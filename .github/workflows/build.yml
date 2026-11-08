@@ -1,0 +1,14 @@
+name: Rust Windows UI
+on: [push, workflow_dispatch]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MEMONOKING-Windows
+          path: target/release/memonoking.exe
