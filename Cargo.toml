@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 eframe = "=0.31.1"
+chrono = "0.4"
+global-hotkey = "0.7"
