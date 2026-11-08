@@ -19,4 +19,4 @@ Rust stable 및 Windows C++ 빌드 도구 설치 후 `cargo run --release`를 �
 
 ## 검증
 
-GitHub Actions에서 Windows Rust 빌드와 서식 검사를 수행하도록 구성했습니다. 로컬 환경에 Rust 도구가 없는 경우 실행 검증은 CI 결과를 확인해야 합니다.
+GitHub Actions에서 Windows Rust 컴파일 검사와 실행 파일 빌드를 수행하도록 구성했습니다. 로컬 환경에 Rust 도구가 없는 경우 빌드 검증은 CI 결과를 확인해야 합니다. 실제 GUI 화면·입력·분리창 동작은 Windows에서 실행해 별도로 확인해야 합니다.
