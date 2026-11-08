@@ -7,3 +7,9 @@ edition = "2021"
 eframe = "=0.31.1"
 chrono = "0.4"
 global-hotkey = "0.7"
+
+arboard = "3"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+fontdue = "0.9"
+scraper = "0.22"

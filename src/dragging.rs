@@ -2,6 +2,7 @@ use crate::*;
 use egui::{Pos2, Rect, ViewportId};
 #[derive(Clone)]
 pub struct Source {
+    pub layer: egui::LayerId,
     pub viewport: ViewportId,
     pub rect: Rect,
     pub note: usize,
@@ -14,6 +15,7 @@ pub enum Destination {
 }
 #[derive(Clone)]
 pub struct Target {
+    pub layer: egui::LayerId,
     pub viewport: ViewportId,
     pub rect: Rect,
     pub kind: Destination,
@@ -28,6 +30,7 @@ impl App {
     pub fn drag_source(&mut self, ui: &egui::Ui, r: &egui::Response, note: usize, card: bool) {
         self.sources.push(Source {
             viewport: ui.ctx().viewport_id(),
+            layer: ui.layer_id(),
             rect: r.rect.intersect(ui.clip_rect()),
             note,
             card,
@@ -51,12 +54,19 @@ impl App {
                     pressed: true,
                     ..
                 } => {
-                    if !self.editor && !self.capture && !self.settings {
+                    if !self.capture && !self.settings {
                         if let Some(source) = self
                             .sources
                             .iter()
                             .rev()
-                            .find(|s| s.viewport == viewport && s.rect.contains(pos))
+                            .find(|s| {
+                                s.viewport == viewport
+                                    && s.rect.contains(
+                                        ctx.layer_transform_from_global(s.layer)
+                                            .unwrap_or(egui::emath::TSTransform::IDENTITY)
+                                            * pos,
+                                    )
+                            })
                             .cloned()
                         {
                             let initial = self.data.notes[source.note].pos;
@@ -74,8 +84,12 @@ impl App {
                         if d.source.viewport == viewport {
                             d.current = pos;
                             if d.source.card && d.origin.distance(pos) > 4. {
-                                self.data.notes[d.source.note].pos = (d.initial + (pos - d.origin))
-                                    .clamp(Vec2::ZERO, Vec2::new(1196., 766.));
+                                self.data.notes[d.source.note].pos = (d.initial
+                                    + (pos - d.origin)
+                                        / ctx
+                                            .layer_transform_to_global(d.source.layer)
+                                            .map_or(1., |t| t.scaling))
+                                .clamp(Vec2::ZERO, Vec2::new(1196., 766.));
                             }
                         }
                     }
@@ -89,13 +103,24 @@ impl App {
                     if let Some(d) = self.drag.take() {
                         if d.source.viewport == viewport && d.origin.distance(pos) > 4. {
                             if d.source.card {
-                                self.data.notes[d.source.note].pos = (d.initial + (pos - d.origin))
-                                    .clamp(Vec2::ZERO, Vec2::new(1196., 766.));
+                                self.data.notes[d.source.note].pos = (d.initial
+                                    + (pos - d.origin)
+                                        / ctx
+                                            .layer_transform_to_global(d.source.layer)
+                                            .map_or(1., |t| t.scaling))
+                                .clamp(Vec2::ZERO, Vec2::new(1196., 766.));
                             } else if let Some(t) = self
                                 .targets
                                 .iter()
                                 .rev()
-                                .find(|t| t.viewport == viewport && t.rect.contains(pos))
+                                .find(|t| {
+                                    t.viewport == viewport
+                                        && t.rect.contains(
+                                            ctx.layer_transform_from_global(t.layer)
+                                                .unwrap_or(egui::emath::TSTransform::IDENTITY)
+                                                * pos,
+                                        )
+                                })
                                 .cloned()
                             {
                                 match t.kind {
@@ -162,6 +187,7 @@ mod tests {
     fn source() -> Source {
         Source {
             viewport: ViewportId::ROOT,
+            layer: egui::LayerId::background(),
             rect: Rect::from_min_max(Pos2::new(10., 10.), Pos2::new(100., 50.)),
             note: 0,
             card: false,
@@ -174,6 +200,7 @@ mod tests {
         a.sources.push(source());
         a.targets.push(Target {
             viewport: ViewportId::ROOT,
+            layer: egui::LayerId::background(),
             rect: Rect::from_min_max(Pos2::new(200., 10.), Pos2::new(300., 100.)),
             kind: Destination::Date(date + chrono::Duration::days(3)),
         });
@@ -204,5 +231,59 @@ mod tests {
         simulate(&mut a, Pos2::new(30., 30.), Pos2::new(80., 60.));
         assert_eq!(a.data.notes[0].pos, initial + Vec2::new(50., 30.));
         assert_eq!(a.data.notes[0].date, Some(date));
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+    #[test]
+    fn scaled_card_drag_uses_scene_coordinates() {
+        let date = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let mut a = App::sample(date);
+        let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new("zoom_test"));
+        a.sources.push(Source {
+            viewport: ViewportId::ROOT,
+            layer,
+            rect: Rect::from_min_max(Pos2::new(10., 10.), Pos2::new(100., 50.)),
+            note: 0,
+            card: true,
+        });
+        let initial = a.data.notes[0].pos;
+        let ctx = egui::Context::default();
+        let from = Pos2::new(215., 115.);
+        let to = Pos2::new(255., 135.);
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerMoved(to),
+            egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                ctx.set_transform_layer(
+                    layer,
+                    egui::emath::TSTransform {
+                        scaling: 0.5,
+                        translation: Vec2::new(200., 100.),
+                    },
+                );
+                a.drag_input(ctx);
+            },
+        );
+        assert_eq!(a.data.notes[0].pos, initial + Vec2::new(80., 40.));
     }
 }

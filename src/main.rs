@@ -1,11 +1,25 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod dragging;
+mod extras;
+mod media;
 mod model;
 mod views;
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use model::{Note, Workspace};
+const PALETTE: [Color32; 10] = [
+    Color32::from_rgb(246, 211, 103),
+    Color32::from_rgb(239, 161, 149),
+    Color32::from_rgb(176, 202, 160),
+    Color32::from_rgb(151, 194, 215),
+    Color32::from_rgb(181, 165, 213),
+    Color32::from_rgb(231, 178, 203),
+    Color32::from_rgb(225, 187, 142),
+    Color32::from_rgb(145, 205, 185),
+    Color32::from_rgb(185, 190, 195),
+    Color32::from_rgb(228, 222, 204),
+];
 const INK: Color32 = Color32::from_rgb(48, 47, 44);
 const MUTED: Color32 = Color32::from_rgb(133, 130, 124);
 const ACCENT: Color32 = Color32::from_rgb(184, 72, 53);
@@ -18,6 +32,7 @@ const COLORS: [Color32; 3] = [
 #[derive(Clone)]
 struct NoteDrag(usize);
 struct App {
+    extra: extras::Extra,
     sources: Vec<dragging::Source>,
     targets: Vec<dragging::Target>,
     drag: Option<dragging::Drag>,
@@ -76,6 +91,7 @@ impl App {
     }
     fn sample(today: NaiveDate) -> Self {
         Self {
+            extra: extras::Extra::default(),
             sources: vec![],
             targets: vec![],
             drag: None,
@@ -208,6 +224,8 @@ impl App {
     fn open_note(&mut self, i: usize) {
         self.active = i;
         self.editor = true;
+        self.sticky = true;
+        self.data.notes[i].fold = 0;
         self.edit_error.clear();
         let n = &self.data.notes[i];
         self.date_edit = n.date.map(|d| d.to_string()).unwrap_or_default();
@@ -263,6 +281,9 @@ impl eframe::App for App {
             self.editor = false;
             self.capture = false;
             self.settings = false;
+            self.extra.search_options = false;
+            self.extra.project_manager = false;
+            self.extra.picker = None;
             self.link_source = None;
         }
         if self.sidebar {
@@ -291,22 +312,39 @@ impl eframe::App for App {
                     {
                         self.capture = true;
                     }
-                    ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("검색"));
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.search)
+                                .hint_text("제목 · 본문 검색"),
+                        )
+                        .changed()
+                    {
+                        self.extra.search_mode = !self.search.is_empty();
+                        if self.extra.search_mode {
+                            self.page = 0;
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("상세 옵션").clicked() {
+                            self.extra.search_options = !self.extra.search_options;
+                        }
+                        if ui.small_button("검색 해제").clicked() {
+                            self.search.clear();
+                            self.extra.search_mode = false;
+                        }
+                    });
                     ui.add_space(12.);
                     egui::ScrollArea::vertical()
                         .max_height((ui.available_height() - 80.).max(100.))
                         .show(ui, |ui| {
                             for (i, name) in [
                                 "내 작업실",
-                                "관리함",
+                                "나만의 위키",
                                 "오늘",
                                 "다음",
                                 "수집함 · 보드",
                                 "캘린더",
-                                "업무일지",
-                                "표 모아보기",
-                                "이미지 모아보기",
-                                "링크 · 즐겨찾기",
+                                "편의기능",
                             ]
                             .iter()
                             .enumerate()
@@ -324,8 +362,18 @@ impl eframe::App for App {
                                 }
                             }
                             ui.add_space(20.);
-                            ui.label(RichText::new("프로젝트").small().color(MUTED));
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("프로젝트").small().color(MUTED));
+                                if ui.small_button("관리").clicked() {
+                                    self.extra.project_manager = true;
+                                }
+                            });
                             for (i, p) in self.data.projects.iter().enumerate() {
+                                if self.extra.hidden_projects.contains(&i)
+                                    || self.extra.deleted_projects.contains(&i)
+                                {
+                                    continue;
+                                }
                                 if ui
                                     .selectable_label(
                                         self.project_filter == Some(i),
@@ -334,7 +382,7 @@ impl eframe::App for App {
                                     .clicked()
                                 {
                                     self.project_filter = Some(i);
-                                    self.page = 1;
+                                    self.page = 0;
                                 }
                             }
                             ui.add_space(14.);
@@ -344,8 +392,10 @@ impl eframe::App for App {
                                     .color(MUTED),
                             );
                             for i in 0..self.data.notes.len() {
-                                if !self.search.is_empty()
-                                    && !self.data.notes[i].title.contains(&self.search)
+                                if !self.visible(i)
+                                    || (!self.search.is_empty()
+                                        && !self.data.notes[i].title.contains(&self.search)
+                                        && !self.data.notes[i].body.contains(&self.search))
                                 {
                                     continue;
                                 }
@@ -407,31 +457,28 @@ impl eframe::App for App {
             if self.page == 4 {
                 self.board(ui);
             } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.);
-                        ui.vertical(|ui| {
-                            ui.set_min_width((ui.available_width() - 25.).max(200.));
-                            match self.page {
-                                0..=3 => self.agenda(ui, self.page),
-                                5 => self.calendar(ui),
-                                6 => self.journal(ui),
-                                _ => self.collections(ui),
-                            }
+                egui::ScrollArea::vertical()
+                    .id_salt(("page_scroll", self.page))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.);
+                            ui.vertical(|ui| {
+                                ui.set_min_width((ui.available_width() - 25.).max(200.));
+                                match self.page {
+                                    1 => self.wiki(ui),
+                                    0 | 2 | 3 => self.agenda(ui, self.page),
+                                    5 => self.calendar(ui),
+                                    6 => self.utilities(ui),
+                                    _ => self.collections(ui),
+                                }
+                            });
                         });
                     });
-                });
             }
         });
-        let mut open = self.editor;
-        egui::Window::new("메모 편집")
-            .open(&mut open)
-            .default_size([600., 540.])
-            .resizable(true)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.note_editor(ui));
-            });
-        self.editor = open;
+        if self.capture {
+            self.capture_project_header();
+        }
         let mut open = self.capture;
         egui::Window::new("빠른 메모")
             .open(&mut open)
@@ -452,7 +499,9 @@ impl eframe::App for App {
                         i,
                     );
                     n.body = self.capture_text.clone();
+                    n.project = self.extra.capture_project.take();
                     self.data.notes.push(n);
+                    self.consume_project_header(i);
                     self.capture_text.clear();
                     self.toast = "수집함 보드에 추가했습니다".into();
                 }
@@ -485,27 +534,8 @@ impl eframe::App for App {
             );
             self.floating = open;
         }
-        if self.sticky {
-            let mut open = true;
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("sticky"),
-                egui::ViewportBuilder::default()
-                    .with_title("MEMONOKING · 분리 메모")
-                    .with_inner_size([540., 650.])
-                    .with_min_inner_size([360., 320.]),
-                |ctx, _| {
-                    self.theme(ctx);
-                    self.drag_input(ctx);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        open = false;
-                    }
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| self.note_editor(ui));
-                    });
-                },
-            );
-            self.sticky = open;
-        }
+        self.detached_note(ctx);
+        self.extra_windows(ctx);
     }
 }
 fn shorten(s: &str, n: usize) -> String {

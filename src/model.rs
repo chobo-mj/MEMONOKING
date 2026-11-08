@@ -11,7 +11,19 @@ pub struct Note {
     pub recurring: bool,
     pub label: usize,
     pub project: Option<usize>,
-    pub parent: Option<usize>,
+    pub parents: Vec<usize>,
+    pub created: NaiveDateTime,
+    pub wiki: bool,
+    pub folder: Option<usize>,
+    pub wiki_comments: Vec<String>,
+    pub journal_comments: Vec<String>,
+    pub color: eframe::egui::Color32,
+    pub topmost: bool,
+    pub fold: u8,
+    pub deleted: bool,
+    pub has_image: bool,
+    pub has_table: bool,
+    pub has_link: bool,
     pub pos: Vec2,
 }
 impl Note {
@@ -27,7 +39,19 @@ impl Note {
             recurring: false,
             label: i % 3,
             project: None,
-            parent: None,
+            parents: vec![],
+            created: Local::now().naive_local(),
+            wiki: false,
+            folder: None,
+            wiki_comments: vec![],
+            journal_comments: vec![],
+            color: crate::PALETTE[i % 10],
+            topmost: false,
+            fold: 0,
+            deleted: false,
+            has_image: false,
+            has_table: false,
+            has_link: false,
             pos: Vec2::new(30. + (i % 3) as f32 * 300., 30. + (i / 3) as f32 * 240.),
         }
     }
@@ -48,7 +72,12 @@ impl Workspace {
             Note::new("하루 마무리 정리", Some(today), 5),
         ];
         notes[0].body = "캘린더 가독성을 높이고 메모와 일정을 자연스럽게 연결합니다.".into();
+        notes[0].has_image = true;
+        notes[1].has_table = true;
+        notes[2].has_link = true;
         notes[0].starred = true;
+        notes[0].wiki = true;
+        notes[0].folder = Some(0);
         notes[0].project = Some(0);
         notes[1].project = Some(0);
         notes[5].recurring = true;
@@ -75,16 +104,20 @@ impl Workspace {
         if c >= self.notes.len() || p >= self.notes.len() {
             return false;
         }
-        let mut cursor = Some(p);
-        let mut depth = 0;
-        while let Some(i) = cursor {
-            if i == c || depth > self.notes.len() {
+        let mut stack = vec![p];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(i) = stack.pop() {
+            if i == c {
                 return false;
             }
-            cursor = self.notes[i].parent;
-            depth += 1;
+            if visited.insert(i) {
+                stack.extend(self.notes[i].parents.iter().copied());
+            }
         }
-        self.notes[c].parent = Some(p);
+        if !self.notes[c].parents.contains(&p) {
+            self.notes[c].parents.push(p);
+        }
+
         true
     }
 }
@@ -98,7 +131,9 @@ mod tests {
         assert!(w.reparent(2, 1));
         assert!(!w.reparent(0, 2));
         assert!(!w.reparent(1, 1));
-        assert_eq!(w.notes[0].parent, None);
+        assert!(w.notes[0].parents.is_empty());
+        assert!(w.reparent(2, 0));
+        assert_eq!(w.notes[2].parents, vec![1, 0]);
     }
     #[test]
     fn completion_stamps_once_and_reopening_removes_journal_entry() {
@@ -117,5 +152,19 @@ mod tests {
         w.connect(1, 0);
         w.connect(0, 0);
         assert_eq!(w.links, vec![(0, 1)]);
+    }
+}
+
+#[cfg(test)]
+mod dag_extra_tests {
+    use super::*;
+    #[test]
+    fn checks_every_parent_path() {
+        let mut w = Workspace::sample(Local::now().date_naive());
+        assert!(w.reparent(2, 0));
+        assert!(w.reparent(2, 1));
+        assert!(!w.reparent(1, 2));
+        assert!(!w.reparent(0, 2));
+        assert_eq!(w.notes[2].parents, vec![0, 1]);
     }
 }
