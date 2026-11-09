@@ -4,6 +4,9 @@ pub struct Note {
     pub title: String,
     pub body: String,
     pub date: Option<NaiveDate>,
+    pub duration: u8,
+    pub occurrence_completed: std::collections::BTreeMap<NaiveDate, NaiveDateTime>,
+    pub occurrence_comments: std::collections::BTreeMap<NaiveDate, Vec<String>>,
     pub time: NaiveTime,
     pub done: bool,
     pub completed: Option<NaiveDateTime>,
@@ -32,6 +35,9 @@ impl Note {
             title: title.into(),
             body: "아이디어와 준비할 내용을 여기에 정리하세요.".into(),
             date,
+            duration: 1,
+            occurrence_completed: Default::default(),
+            occurrence_comments: Default::default(),
             time: NaiveTime::from_hms_opt(9 + (i % 8) as u32, 0, 0).unwrap(),
             done: false,
             completed: None,
@@ -54,6 +60,66 @@ impl Note {
             has_link: false,
             pos: Vec2::new(30. + (i % 3) as f32 * 300., 30. + (i / 3) as f32 * 240.),
         }
+    }
+}
+impl Note {
+    pub fn move_start(&mut self, date: NaiveDate) {
+        if let Some(old) = self.date {
+            let delta = date - old;
+            self.occurrence_completed = std::mem::take(&mut self.occurrence_completed)
+                .into_iter()
+                .map(|(d, t)| (d + delta, t))
+                .collect();
+            self.occurrence_comments = std::mem::take(&mut self.occurrence_comments)
+                .into_iter()
+                .map(|(d, c)| (d + delta, c))
+                .collect();
+        }
+        let was_unassigned = self.date.is_none();
+        self.date = Some(date);
+        if self.duration > 1 {
+            if was_unassigned && self.done {
+                if let Some(t) = self.completed {
+                    for d in self.days() {
+                        self.occurrence_completed.insert(d, t);
+                    }
+                }
+            }
+            self.refresh_done();
+        }
+    }
+    pub fn days(&self) -> Vec<NaiveDate> {
+        self.date
+            .map(|d| {
+                (0..self.duration.clamp(1, 5))
+                    .map(|i| d + Duration::days(i as i64))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn occurs(&self, d: NaiveDate) -> bool {
+        self.date.is_some_and(|start| {
+            d >= start && d < start + Duration::days(self.duration.clamp(1, 5) as i64)
+        })
+    }
+    pub fn done_on(&self, d: Option<NaiveDate>) -> bool {
+        if self.duration > 1 && self.date.is_some() {
+            d.is_some_and(|d| self.occurrence_completed.contains_key(&d))
+        } else {
+            self.done
+        }
+    }
+    pub fn refresh_done(&mut self) {
+        if self.date.is_none() {
+            return;
+        }
+        let days = self.days();
+        self.occurrence_completed.retain(|d, _| days.contains(d));
+        self.done = !days.is_empty()
+            && days
+                .iter()
+                .all(|d| self.occurrence_completed.contains_key(d));
+        self.completed = self.occurrence_completed.values().max().copied();
     }
 }
 pub struct Workspace {
@@ -89,11 +155,21 @@ impl Workspace {
     }
     pub fn complete(&mut self, i: usize, done: bool, now: DateTime<Local>) {
         let n = &mut self.notes[i];
-        if n.done != done {
+        if n.duration > 1 && n.date.is_some() {
+            for d in n.days() {
+                if done {
+                    n.occurrence_completed.entry(d).or_insert(now.naive_local());
+                } else {
+                    n.occurrence_completed.remove(&d);
+                }
+            }
+            n.refresh_done();
+        } else if n.done != done {
             n.done = done;
             n.completed = if done { Some(now.naive_local()) } else { None };
         }
     }
+
     pub fn connect(&mut self, a: usize, b: usize) {
         let e = (a.min(b), a.max(b));
         if a != b && !self.links.contains(&e) {

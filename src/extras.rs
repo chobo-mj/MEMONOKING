@@ -50,8 +50,17 @@ pub struct Extra {
     pub folder_selected: Option<usize>,
     pub wiki_selected: Option<usize>,
     pub tree_selected: Option<usize>,
-    pub drafts: HashMap<(usize, usize), String>,
-    pub journal_open: HashMap<usize, bool>,
+    pub drafts: HashMap<(usize, usize, Option<NaiveDate>), String>,
+    pub wiki_unfiled: bool,
+    pub folder_open: HashSet<usize>,
+    pub completion_scope: Option<(usize, NaiveDate, bool)>,
+    pub comment_occurrence: Option<NaiveDate>,
+    pub edit_occurrence: Option<NaiveDate>,
+    pub missing_image: Option<usize>,
+    pub swatch_size: Vec2,
+    pub swatch_drag: Option<crate::refinements::SwatchDrag>,
+    pub journal_open: HashMap<(usize, Option<NaiveDate>), bool>,
+    pub scope_owner: egui::ViewportId,
     pub journal_all: bool,
     pub picker: Option<Picker>,
     pub search_options: bool,
@@ -97,11 +106,20 @@ impl Default for Extra {
                 description: "업무 중 쌓인 참고 정보".into(),
                 parent: None,
             }],
-            folder_selected: Some(0),
+            folder_selected: None,
             wiki_selected: None,
             tree_selected: None,
             drafts: HashMap::new(),
+            wiki_unfiled: false,
+            folder_open: HashSet::from([0]),
+            completion_scope: None,
+            comment_occurrence: None,
+            edit_occurrence: None,
+            missing_image: None,
+            swatch_size: Vec2::new(48., 48.),
+            swatch_drag: None,
             journal_open: HashMap::new(),
+            scope_owner: egui::ViewportId::ROOT,
             journal_all: false,
             picker: None,
             search_options: false,
@@ -159,11 +177,10 @@ impl App {
                     self.extra.created_to,
                 ))
             && (!self.extra.search_scheduled
-                || date_matches(n.date, self.extra.scheduled_from, self.extra.scheduled_to))
-            && self
-                .extra
-                .search_project
-                .is_none_or(|p| n.project == Some(p))
+                || n.days().into_iter().any(|d| {
+                    date_matches(Some(d), self.extra.scheduled_from, self.extra.scheduled_to)
+                }))
+            && crate::refinements::project_match(self.extra.search_project, n.project)
             && (!self.extra.image || n.has_image)
             && (!self.extra.table || n.has_table)
             && (!self.extra.link || n.has_link || n.body.contains("http"))
@@ -266,8 +283,18 @@ impl App {
         let fold = self.data.notes[i].fold;
         let size = match fold {
             1 => Vec2::new(380., 42.),
-            2 => Vec2::new(48., 48.),
+            2 => self.extra.swatch_size,
             _ => self.extra.note_size,
+        };
+        let min_size = match fold {
+            0 => Vec2::new(360., 320.),
+            1 => size,
+            _ => Vec2::new(24., 24.),
+        };
+        let max_size = match fold {
+            0 => Vec2::new(4096., 4096.),
+            1 => size,
+            _ => Vec2::new(360., 360.),
         };
         let id = egui::ViewportId::from_hash_of("note_editor");
         let mut open = true;
@@ -279,12 +306,8 @@ impl App {
                 .with_title(title)
                 .with_decorations(fold == 0)
                 .with_inner_size(size)
-                .with_min_inner_size(if fold == 0 {
-                    Vec2::new(360., 320.)
-                } else {
-                    size
-                })
-                .with_resizable(fold == 0)
+                .with_min_inner_size(min_size)
+                .with_resizable(fold != 1)
                 .with_window_level(if top {
                     egui::WindowLevel::AlwaysOnTop
                 } else {
@@ -306,19 +329,22 @@ impl App {
                 }));
                 if self.extra.size_applied != Some((i, fold)) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(fold == 0));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(if fold == 0 {
-                        Vec2::new(360., 320.)
-                    } else {
-                        size
-                    }));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(if fold == 0 {
-                        Vec2::new(4096., 4096.)
-                    } else {
-                        size
-                    }));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(max_size));
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(fold == 0));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(fold != 1));
                     self.extra.size_applied = Some((i, fold));
+                }
+                if fold == 2 && self.extra.size_applied == Some((i, 2)) {
+                    if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
+                        if r.width() >= 24.
+                            && r.width() <= 360.
+                            && r.height() >= 24.
+                            && r.height() <= 360.
+                        {
+                            self.extra.swatch_size = r.size();
+                        }
+                    }
                 }
                 if ctx.input(|i| i.viewport().close_requested()) {
                     open = false;
@@ -335,16 +361,7 @@ impl App {
                     )
                     .show(ctx, |ui| {
                         if fold == 2 {
-                            if ui
-                                .add_sized(
-                                    ui.available_size(),
-                                    egui::Button::new("").fill(self.data.notes[i].color),
-                                )
-                                .on_hover_text(&self.data.notes[i].title)
-                                .clicked()
-                            {
-                                self.data.notes[i].fold = 0;
-                            }
+                            self.swatch_ui(ctx, ui, i);
                         } else {
                             ui.horizontal(|ui| {
                                 if ui.button("접기").clicked() {
@@ -376,6 +393,7 @@ impl App {
                         }
                     });
                 self.picker_window(ctx);
+                self.scope_dialog(ctx);
             },
         );
         if !open {
@@ -399,7 +417,8 @@ impl App {
                     self.data.notes[i].time,
                 ));
             }
-            if self.data.notes[i].done && ui.button("완료 시각 달력").clicked() {
+            if self.data.notes[i].completed.is_some() && ui.button("완료 시각 달력").clicked()
+            {
                 let t = self.data.notes[i]
                     .completed
                     .unwrap_or(Local::now().naive_local());
@@ -480,22 +499,51 @@ impl App {
             match p.target {
                 0 => {
                     let n = &mut self.data.notes[self.active];
-                    n.date = Some(p.date);
+                    n.move_start(p.date);
                     n.time = chrono::NaiveTime::from_hms_opt(p.hour, p.minute, 0).unwrap();
                     self.date_edit = p.date.to_string();
                     self.time_edit = n.time.format("%H:%M").to_string();
                 }
                 1 => self.journal_date = p.date.to_string(),
-                2 => self.extra.created_from = Some(p.date),
-                3 => self.extra.created_to = Some(p.date),
-                4 => self.extra.scheduled_from = Some(p.date),
-                5 => self.extra.scheduled_to = Some(p.date),
-                6 => self.extra.media_from = Some(p.date),
-                7 => self.extra.media_to = Some(p.date),
+                2 => {
+                    self.extra.created_from = Some(p.date);
+                    self.extra.created_to = Some(p.date);
+                }
+                3 => {
+                    let (a, b) = crate::refinements::ordered_range(
+                        self.extra.created_from.unwrap_or(p.date),
+                        p.date,
+                    );
+                    self.extra.created_from = Some(a);
+                    self.extra.created_to = Some(b);
+                }
+                4 => {
+                    self.extra.scheduled_from = Some(p.date);
+                    self.extra.scheduled_to = Some(p.date);
+                }
+                5 => {
+                    let (a, b) = crate::refinements::ordered_range(
+                        self.extra.scheduled_from.unwrap_or(p.date),
+                        p.date,
+                    );
+                    self.extra.scheduled_from = Some(a);
+                    self.extra.scheduled_to = Some(b);
+                }
+                6 => {
+                    self.extra.media_from = Some(p.date);
+                    self.extra.media_to = Some(p.date);
+                }
+                7 => {
+                    let (a, b) = crate::refinements::ordered_range(
+                        self.extra.media_from.unwrap_or(p.date),
+                        p.date,
+                    );
+                    self.extra.media_from = Some(a);
+                    self.extra.media_to = Some(b);
+                }
                 8 => {
                     let t = p.date.and_hms_opt(p.hour, p.minute, 0).unwrap();
-                    self.data.notes[self.active].completed = Some(t);
-                    self.completion_edit = t.format("%Y-%m-%d %H:%M").to_string();
+                    self.set_completion_time(t);
                 }
                 _ => {}
             }
@@ -528,7 +576,18 @@ impl App {
 }
 impl App {
     pub fn comments(&mut self, ui: &mut egui::Ui, i: usize, channel: usize) {
-        let list = if channel == 0 {
+        let scope = if channel == 1 {
+            self.extra.comment_occurrence
+        } else {
+            None
+        };
+        let list = if let Some(d) = scope {
+            self.data.notes[i]
+                .occurrence_comments
+                .get(&d)
+                .cloned()
+                .unwrap_or_default()
+        } else if channel == 0 {
             self.data.notes[i].wiki_comments.clone()
         } else {
             self.data.notes[i].journal_comments.clone()
@@ -538,156 +597,27 @@ impl App {
                 ui.label(c);
             });
         }
-        let draft = self.extra.drafts.entry((channel, i)).or_default();
-        ui.add(
-            egui::TextEdit::multiline(draft)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY)
-                .hint_text("댓글을 입력하세요"),
-        );
+        let draft = self.extra.drafts.entry((channel, i, scope)).or_default();
+        crate::refinements::body_input(ui, draft, 3, "댓글을 입력하세요");
         if ui.button("댓글 추가").clicked() && !draft.trim().is_empty() {
             let c = format!(
                 "{}\n{}",
                 Local::now().format("%Y-%m-%d %H:%M"),
                 draft.trim()
             );
-            if channel == 0 {
+            if let Some(d) = scope {
+                self.data.notes[i]
+                    .occurrence_comments
+                    .entry(d)
+                    .or_default()
+                    .push(c)
+            } else if channel == 0 {
                 self.data.notes[i].wiki_comments.push(c)
             } else {
                 self.data.notes[i].journal_comments.push(c)
             }
             draft.clear();
         }
-    }
-    pub fn wiki(&mut self, ui: &mut egui::Ui) {
-        ui.heading("나만의 위키");
-        ui.label(
-            RichText::new(
-                "위키 표시한 메모를 폴더로 분류합니다. 완료하거나 일정이 지나도 남습니다.",
-            )
-            .small()
-            .color(MUTED),
-        );
-        ui.horizontal(|ui| {
-            if ui.button("+ 최상위 폴더").clicked() {
-                let i = self.extra.folders.len();
-                self.extra.folders.push(Folder {
-                    title: "새 폴더".into(),
-                    description: String::new(),
-                    parent: None,
-                });
-                self.extra.folder_selected = Some(i);
-            }
-            if ui.button("+ 선택 폴더 아래").clicked() {
-                let parent = self.extra.folder_selected;
-                let i = self.extra.folders.len();
-                self.extra.folders.push(Folder {
-                    title: "새 하위폴더".into(),
-                    description: String::new(),
-                    parent,
-                });
-                self.extra.folder_selected = Some(i);
-            }
-        });
-        ui.separator();
-        ui.columns(2, |cols| {
-            let roots: Vec<_> = self
-                .extra
-                .folders
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| f.parent.is_none())
-                .map(|(i, _)| i)
-                .collect();
-            for i in roots {
-                self.wiki_folder(&mut cols[0], i);
-            }
-            cols[0].strong("미분류");
-            let loose: Vec<_> = self
-                .data
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| self.visible(*i) && n.wiki && n.folder.is_none())
-                .map(|(i, _)| i)
-                .collect();
-            for i in loose {
-                if cols[0]
-                    .selectable_label(
-                        self.extra.wiki_selected == Some(i),
-                        &self.data.notes[i].title,
-                    )
-                    .clicked()
-                {
-                    self.extra.wiki_selected = Some(i);
-                }
-            }
-            if let Some(f) = self.extra.folder_selected {
-                cols[0].separator();
-                cols[0].label("선택한 폴더 제목");
-                cols[0].text_edit_singleline(&mut self.extra.folders[f].title);
-                cols[0].label("설명");
-                cols[0].text_edit_multiline(&mut self.extra.folders[f].description);
-            }
-            if let Some(i) = self
-                .extra
-                .wiki_selected
-                .filter(|&i| self.visible(i) && self.data.notes[i].wiki)
-            {
-                cols[1].heading(&self.data.notes[i].title);
-                cols[1].separator();
-                cols[1].label(&self.data.notes[i].body);
-                cols[1].add_space(20.);
-                cols[1].strong("위키 댓글");
-                self.comments(&mut cols[1], i, 0);
-            } else {
-                cols[1].label("왼쪽 폴더에서 메모를 선택하세요.");
-            }
-        });
-    }
-    fn wiki_folder(&mut self, ui: &mut egui::Ui, f: usize) {
-        let folder = self.extra.folders[f].clone();
-        egui::CollapsingHeader::new(folder.title)
-            .id_salt(("folder", f))
-            .default_open(true)
-            .show(ui, |ui| {
-                if ui.small_button("이 폴더 관리").clicked() {
-                    self.extra.folder_selected = Some(f);
-                }
-                if !folder.description.is_empty() {
-                    ui.label(RichText::new(folder.description).small().color(MUTED));
-                }
-                let ids: Vec<_> = self
-                    .data
-                    .notes
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, n)| self.visible(*i) && n.wiki && n.folder == Some(f))
-                    .map(|(i, _)| i)
-                    .collect();
-                for i in ids {
-                    if ui
-                        .selectable_label(
-                            self.extra.wiki_selected == Some(i),
-                            &self.data.notes[i].title,
-                        )
-                        .clicked()
-                    {
-                        self.extra.wiki_selected = Some(i);
-                    }
-                }
-                let children: Vec<_> = self
-                    .extra
-                    .folders
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| n.parent == Some(f))
-                    .map(|(i, _)| i)
-                    .collect();
-                for i in children {
-                    self.wiki_folder(ui, i);
-                }
-            });
     }
     pub fn relation_tree(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |cols| {
@@ -926,27 +856,24 @@ impl App {
                 ui.horizontal(|ui| {
                     self.date_filter_button(ui, 2, "시작", self.extra.created_from);
                     self.date_filter_button(ui, 3, "끝", self.extra.created_to);
-                    if ui.small_button("하루만").clicked() {
-                        self.extra.created_to = self.extra.created_from;
-                    }
                 });
                 ui.checkbox(&mut self.extra.search_scheduled, "일정 조건");
                 ui.horizontal(|ui| {
                     self.date_filter_button(ui, 4, "시작", self.extra.scheduled_from);
                     self.date_filter_button(ui, 5, "끝", self.extra.scheduled_to);
-                    if ui.small_button("하루만").clicked() {
-                        self.extra.scheduled_to = self.extra.scheduled_from;
-                    }
                 });
                 egui::ComboBox::from_id_salt("search_project")
-                    .selected_text(
-                        self.extra
-                            .search_project
-                            .map(|p| self.data.projects[p].as_str())
-                            .unwrap_or("모든 프로젝트"),
-                    )
+                    .selected_text(crate::refinements::project_label(
+                        self.extra.search_project,
+                        &self.data.projects,
+                    ))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.extra.search_project, None, "모든 프로젝트");
+                        ui.selectable_value(
+                            &mut self.extra.search_project,
+                            Some(NO_PROJECT),
+                            "프로젝트 없음",
+                        );
                         for (p, name) in self.data.projects.iter().enumerate() {
                             if !self.extra.deleted_projects.contains(&p) {
                                 ui.selectable_value(&mut self.extra.search_project, Some(p), name);
@@ -986,6 +913,8 @@ impl App {
         self.extra.search_options = open;
     }
     pub fn extra_windows(&mut self, ctx: &egui::Context) {
+        self.scope_dialog(ctx);
+        self.missing_image_dialog(ctx);
         self.project_window(ctx);
         self.search_window(ctx);
         self.picker_window(ctx);

@@ -3,6 +3,7 @@ mod dragging;
 mod extras;
 mod media;
 mod model;
+mod refinements;
 mod views;
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Color32, RichText, Vec2};
@@ -20,6 +21,7 @@ const PALETTE: [Color32; 10] = [
     Color32::from_rgb(185, 190, 195),
     Color32::from_rgb(228, 222, 204),
 ];
+const NO_PROJECT: usize = usize::MAX;
 const INK: Color32 = Color32::from_rgb(48, 47, 44);
 const MUTED: Color32 = Color32::from_rgb(133, 130, 124);
 const ACCENT: Color32 = Color32::from_rgb(184, 72, 53);
@@ -30,7 +32,7 @@ const COLORS: [Color32; 3] = [
     Color32::from_rgb(201, 151, 84),
 ];
 #[derive(Clone)]
-struct NoteDrag(usize);
+struct NoteDrag;
 struct App {
     extra: extras::Extra,
     sources: Vec<dragging::Source>,
@@ -223,6 +225,11 @@ impl App {
     }
     fn open_note(&mut self, i: usize) {
         self.active = i;
+        self.extra.edit_occurrence = self.data.notes[i]
+            .occurrence_completed
+            .keys()
+            .next_back()
+            .copied();
         self.editor = true;
         self.sticky = true;
         self.data.notes[i].fold = 0;
@@ -241,7 +248,7 @@ impl App {
         self.open_note(i);
     }
     fn done(&mut self, i: usize, value: bool) {
-        self.data.complete(i, value, Local::now());
+        self.done_at(i, None, value);
     }
 }
 impl Drop for App {
@@ -403,7 +410,7 @@ impl eframe::App for App {
                                     egui::Label::new(shorten(&self.data.notes[i].title, 15))
                                         .sense(egui::Sense::click_and_drag()),
                                 );
-                                r.dnd_set_drag_payload(NoteDrag(i));
+                                r.dnd_set_drag_payload(NoteDrag);
                                 self.drag_source(ui, &r, i, false);
                                 if r.clicked() {
                                     self.open_note(i);

@@ -7,11 +7,14 @@ pub struct Source {
     pub rect: Rect,
     pub note: usize,
     pub card: bool,
+    pub folder: bool,
+    pub occurrence: Option<NaiveDate>,
 }
 #[derive(Clone)]
 pub enum Destination {
     Date(NaiveDate),
     Parent(usize),
+    WikiFolder(Option<usize>),
 }
 #[derive(Clone)]
 pub struct Target {
@@ -34,6 +37,8 @@ impl App {
             rect: r.rect.intersect(ui.clip_rect()),
             note,
             card,
+            folder: false,
+            occurrence: None,
         });
     }
     pub fn drag_input(&mut self, ctx: &egui::Context) {
@@ -69,7 +74,11 @@ impl App {
                             })
                             .cloned()
                         {
-                            let initial = self.data.notes[source.note].pos;
+                            let initial = if source.folder {
+                                Vec2::ZERO
+                            } else {
+                                self.data.notes[source.note].pos
+                            };
                             self.drag = Some(Drag {
                                 source,
                                 origin: pos,
@@ -125,15 +134,31 @@ impl App {
                             {
                                 match t.kind {
                                     Destination::Date(date) => {
-                                        self.data.notes[d.source.note].date = Some(date);
-                                        self.day = date;
-                                        self.toast = format!(
-                                            "{} → {}",
-                                            self.data.notes[d.source.note].title, date
-                                        );
+                                        if !d.source.folder {
+                                            let n = &mut self.data.notes[d.source.note];
+                                            let new_start = match (n.date, d.source.occurrence) {
+                                                (Some(start), Some(from)) => start + (date - from),
+                                                _ => date,
+                                            };
+                                            n.move_start(new_start);
+                                            self.day = date;
+                                            self.toast = format!("{} → {}", n.title, new_start);
+                                        }
+                                    }
+                                    Destination::WikiFolder(folder) => {
+                                        if d.source.folder {
+                                            if !self.move_folder(d.source.note, folder) {
+                                                self.toast="폴더의 자기 자신/하위 폴더 안으로는 이동할 수 없습니다".into();
+                                            }
+                                        } else if self.data.notes[d.source.note].wiki {
+                                            self.data.notes[d.source.note].folder = folder;
+                                            self.toast = "위키 메모를 분류했습니다".into();
+                                        }
                                     }
                                     Destination::Parent(parent) => {
-                                        if !self.data.reparent(d.source.note, parent) {
+                                        if !d.source.folder
+                                            && !self.data.reparent(d.source.note, parent)
+                                        {
                                             self.toast =
                                                 "자기 자신 또는 순환 관계는 만들 수 없습니다"
                                                     .into();
@@ -158,7 +183,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn simulate(a: &mut App, from: Pos2, to: Pos2) {
+    pub(super) fn simulate(a: &mut App, from: Pos2, to: Pos2) {
         let ctx = egui::Context::default();
         let events = vec![
             egui::Event::PointerMoved(from),
@@ -184,13 +209,15 @@ mod tests {
             |ctx| a.drag_input(ctx),
         );
     }
-    fn source() -> Source {
+    pub(super) fn source() -> Source {
         Source {
             viewport: ViewportId::ROOT,
             layer: egui::LayerId::background(),
             rect: Rect::from_min_max(Pos2::new(10., 10.), Pos2::new(100., 50.)),
             note: 0,
             card: false,
+            folder: false,
+            occurrence: None,
         }
     }
     #[test]
@@ -248,6 +275,8 @@ mod zoom_tests {
             rect: Rect::from_min_max(Pos2::new(10., 10.), Pos2::new(100., 50.)),
             note: 0,
             card: true,
+            folder: false,
+            occurrence: None,
         });
         let initial = a.data.notes[0].pos;
         let ctx = egui::Context::default();
@@ -285,5 +314,65 @@ mod zoom_tests {
             },
         );
         assert_eq!(a.data.notes[0].pos, initial + Vec2::new(80., 40.));
+    }
+}
+#[cfg(test)]
+mod wiki_period_tests {
+    use super::*;
+    fn target(kind: Destination) -> Target {
+        Target {
+            viewport: ViewportId::ROOT,
+            layer: egui::LayerId::background(),
+            rect: Rect::from_min_max(Pos2::new(200., 10.), Pos2::new(300., 100.)),
+            kind,
+        }
+    }
+    #[test]
+    fn wiki_drop_changes_classification_without_copying_note() {
+        let mut a = App::sample(Local::now().date_naive());
+        let count = a.data.notes.len();
+        a.sources.push(super::tests::source());
+        a.targets.push(target(Destination::WikiFolder(None)));
+        super::tests::simulate(&mut a, Pos2::new(30., 30.), Pos2::new(230., 30.));
+        assert!(a.data.notes[0].folder.is_none());
+        a.sources.push(super::tests::source());
+        a.targets.push(target(Destination::WikiFolder(Some(0))));
+        super::tests::simulate(&mut a, Pos2::new(30., 30.), Pos2::new(230., 30.));
+        assert_eq!(a.data.notes[0].folder, Some(0));
+        assert_eq!(a.data.notes.len(), count);
+    }
+    #[test]
+    fn folder_drag_keeps_note_data_untouched() {
+        let mut a = App::sample(Local::now().date_naive());
+        a.extra.folders.push(crate::extras::Folder {
+            title: "두번째".into(),
+            description: String::new(),
+            parent: None,
+        });
+        let mut source = super::tests::source();
+        source.folder = true;
+        source.note = 1;
+        a.sources.push(source);
+        a.targets.push(target(Destination::WikiFolder(Some(0))));
+        super::tests::simulate(&mut a, Pos2::new(30., 30.), Pos2::new(230., 30.));
+        assert_eq!(a.extra.folders[1].parent, Some(0));
+        assert_eq!(a.data.notes[1].parents, Vec::<usize>::new());
+    }
+    #[test]
+    fn dragging_middle_day_moves_whole_period_by_offset() {
+        let start = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let mut a = App::sample(start);
+        a.data.notes[0].duration = 3;
+        let mut s = super::tests::source();
+        s.occurrence = Some(start + chrono::Duration::days(1));
+        a.sources.push(s);
+        a.targets
+            .push(target(Destination::Date(start + chrono::Duration::days(4))));
+        super::tests::simulate(&mut a, Pos2::new(30., 30.), Pos2::new(230., 30.));
+        assert_eq!(
+            a.data.notes[0].date,
+            Some(start + chrono::Duration::days(3))
+        );
+        assert_eq!(a.data.notes[0].duration, 3);
     }
 }

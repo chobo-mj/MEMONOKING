@@ -6,6 +6,19 @@ Windows Rust + egui/eframe 개인 메모·일정 작업 공간 프로토타입. 
 
 Rust stable, Windows C++ 빌드 도구를 설치한 뒤 `cargo run --release --locked`. 빌드 의존성 다운로드에는 인터넷이 필요합니다. 한국어는 Windows 맑은 고딕을 읽습니다.
 
+## v1.6 추가 동작
+
+- 프로젝트 필터의 **프로젝트 없음**. 일정 없는 메모를 달력에 놓으면 일정 자동 지정.
+- 위키의 단일 **새 폴더** 버튼: 선택 없음은 최상위, 선택 폴더가 있으면 그 안에 생성. 생성 후 맥락을 유지해 형제 폴더를 연속 생성. 폴더/위키 메모 드래그 분류와 미분류 필터.
+- 위키 오른쪽 목록 클릭은 독립 편집창, 왼쪽 트리 제목 클릭은 오른쪽 본문/댓글 보기. 트리에서도 댓글 펼치기.
+- 본문과 모든 댓글은 동일한 다중행 입력 위젯 사용. 현재는 텍스트 기반이며 리치 블록/표/이미지 입력 엔진은 제품 연결 단계.
+- 날짜 필터는 시작/끝만 사용. 시작 선택 시 둘 다 같은 날, 종료를 앞선 날짜로 고르면 자동 순서 정리.
+- 색상 네모의 중앙 드래그 이동·네 모서리 크기 변경.
+- 1~5일 기간 선택, 같은 메모의 날짜별 표시. 완료/해제 시 **이 날짜만 / 이 날짜 이후 모두** 선택. 날짜별 취소선·일지·댓글, 오늘/다음의 추가 중요 모음.
+- 갤러리 이미지 클릭 복사, 아이콘 저장. 원본 용량 정리 후 썸네일 유지, 썸네일 클릭에서 백업 안내/찾기.
+
+최신 상세 계약: [20 위키 분류·기간 일정·동선](plans/20-wiki-classification-periods-refinements.md). 최신 화면 검증: [v4 기록](docs/visual-qa-v4.md).
+
 ## 화면에서 해볼 수 있는 기능
 
 - 작업실·오늘·다음의 일정순 목록, 오른쪽 캘린더 열기/닫기, 목록→날짜와 날짜→날짜 드래그.
@@ -30,6 +43,6 @@ Rust stable, Windows C++ 빌드 도구를 설치한 뒤 `cargo run --release --l
 
 ## 계획과 검증
 
-제품 계획 v1.5: [plan.md](plan.md), [16 창/날짜](plans/16-note-windows-colors-date-picker.md), [17 DAG/위키](plans/17-dag-board-wiki.md), [18 편의기능/미디어](plans/18-utilities-comments-media.md), [19 프로젝트/검색](plans/19-projects-created-search.md).
+제품 계획 v1.6: [plan.md](plan.md), [16 창/날짜](plans/16-note-windows-colors-date-picker.md), [17 DAG/위키](plans/17-dag-board-wiki.md), [18 편의기능/미디어](plans/18-utilities-comments-media.md), [19 프로젝트/검색](plans/19-projects-created-search.md).
 
-`cargo test --locked` 18개 통과. 실제 화면 확인 범위와 한계: [v3 검증 기록](docs/visual-qa-v3.md). 계획은 현재 UI의 구현 완료 목록이 아닙니다.
+`cargo test --locked` 32개 통과. 실제 화면 확인 범위와 한계: [v3 검증 기록](docs/visual-qa-v3.md). 계획은 현재 UI의 구현 완료 목록이 아닙니다.

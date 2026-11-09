@@ -530,3 +530,8 @@ G0 이전에는 기술 스택 교체를 확정하지 않는다. 기존 구조로
 ## v1.5 인수 범위
 
 16~19의 WIN/COLOR/DATE/DAG/BOARD/TREE/WIKI/UTIL/JOURNAL/TABLE/MEDIA/BKM/PROJECT/CREATED/SEARCH 요구사항을 추가하고 M16-T-01~06, M17-T-01~06, M18-T-01~07, M19-T-01~06을 통합 인수한다. 기존 단일 부모 기대 시험은 여러 부모가 성공하되 조상 역방향이 실패하는 DAG 시험으로 교체한다. 표/이미지/즐겨찾기 예시 자료의 버튼 성공을 실제 본문 첨부 엔진·보관 카탈로그의 영속 저장 완료로 오인하지 않는다.
+
+
+## v1.6 인수 범위
+
+[20 위키·기간·동선](20-wiki-classification-periods-refinements.md)의 FILTER/WIKI/EDIT/DATE/WIN/SPAN/MEDIA/JOURNAL-20 요구와 M20-T-01~09를 추가한다. 날짜 역전은 거부가 아니라 자동 정렬, 새 폴더는 별도 최상위/하위 버튼이 아니라 선택 맥락을 따르는 단일 명령이다. 댓글은 본문과 공통 엔진을 사용하며 기간 발생별 완료/댓글을 혼합하지 않는다.

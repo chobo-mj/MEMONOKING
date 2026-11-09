@@ -8,6 +8,7 @@ pub struct Asset {
     pub name: String,
     pub date: NaiveDate,
     pub bytes: Option<Vec<u8>>,
+    pub thumbnail: Option<Vec<u8>>,
     pub temporary: Option<Vec<u8>>,
     pub path: Option<PathBuf>,
     pub texture: Option<egui::TextureHandle>,
@@ -104,6 +105,7 @@ fn sample_asset(i: usize) -> Asset {
     Asset {
         name: format!("예시 이미지 {}", i + 1),
         date: Local::now().date_naive() - chrono::Duration::days(i as i64),
+        thumbnail: png(image::imageops::thumbnail(&img, 120, 75)).ok(),
         bytes: png(img).ok(),
         temporary: None,
         path: None,
@@ -233,11 +235,8 @@ impl App {
             temp as f64 / 1024.
         ));
         ui.horizontal_wrapped(|ui| {
-            self.date_filter_button(ui, 6, "날짜 / 시작", self.extra.media_from);
-            self.date_filter_button(ui, 7, "끝", self.extra.media_to);
-            if ui.button("날짜만").clicked() {
-                self.extra.media_to = self.extra.media_from;
-            }
+            self.date_filter_button(ui, 6, "시작 날짜", self.extra.media_from);
+            self.date_filter_button(ui, 7, "끝 날짜", self.extra.media_to);
             if ui.button("필터 해제").clicked() {
                 self.extra.media_from = None;
                 self.extra.media_to = None;
@@ -285,14 +284,15 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect();
-        ui.horizontal_wrapped(|ui|{for i in ids{ui.push_id(i,|ui|{egui::Frame::group(ui.style()).show(ui,|ui|{ui.vertical(|ui|{ui.set_width(235.);let m=&mut self.extra.media[i];if m.texture.is_none(){if let Some(bytes)=m.displayed(){if let Ok(img)=decode(bytes){let ci=egui::ColorImage::from_rgba_unmultiplied([img.width()as usize,img.height()as usize],img.as_raw());m.texture=Some(ui.ctx().load_texture(format!("asset-{i}"),ci,egui::TextureOptions::LINEAR));}}}
-if let Some(t)=&m.texture{ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::new(235.,147.)));}else{ui.allocate_ui(Vec2::new(235.,147.),|ui|{ui.centered_and_justified(|ui|{ui.label("외부 보관 중");});});}ui.strong(&m.name);ui.label(format!("{} · {:.1} KB{}",m.date,m.displayed().map_or(0,|b|b.len())as f64/1024.,if m.temporary.is_some(){" · 임시"}else{""}));
- if ui.button("이미지 복사").clicked(){let b=self.extra.media[i].displayed().map(ToOwned::to_owned);self.toast=match b.ok_or("이미지를 먼저 임시로 여세요".into()).and_then(|b|self.copy_image_bytes(&b)){Ok(())=>"이미지를 복사했습니다".into(),Err(e)=>e};}
- if ui.button("다른 이름으로 저장하기").clicked(){if let Some(path)=rfd::FileDialog::new().add_filter("PNG",&["png"]).set_file_name(format!("image-{}.png",i+1)).save_file(){let result=self.extra.media[i].displayed().ok_or("이미지를 먼저 여세요".into()).and_then(decode).and_then(png).and_then(|b|std::fs::write(&path,b).map_err(|e|e.to_string()));match result{Ok(())=>{self.extra.media[i].path=Some(path);self.toast="이미지 저장 완료".into()},Err(e)=>self.toast=e}}}
- if let Some(path)=self.extra.media[i].path.clone(){ui.label(RichText::new(path.display().to_string()).small().color(MUTED));if self.extra.media[i].bytes.is_some(){if ui.button("저장 확인 후 본문 용량 비우기").clicked(){match read_image(&path).and_then(|b|{let external=decode(&b)?;let current=decode(self.extra.media[i].bytes.as_deref().ok_or("원본 없음")?)?;if external==current{Ok(())}else{Err("보관 파일 내용이 원본과 다릅니다".into())}}){Ok(())=>{self.extra.media[i].bytes=None;self.extra.media[i].texture=None;self.toast="본문 이미지 용량을 비웠습니다. 외부 보관 경로는 유지합니다.".into()},Err(e)=>self.toast=format!("보관 파일 확인 실패·원본 유지: {e}")}}}else if ui.button("기억한 위치에서 임시 다시 보기").clicked(){match read_image(&path){Ok(b)=>{self.extra.media[i].temporary=Some(b);self.extra.media[i].texture=None},Err(e)=>self.toast=e}}}
- if ui.button("다른 위치의 이미지 임시 열기…").clicked(){if let Some(path)=rfd::FileDialog::new().add_filter("이미지",&["png","jpg","jpeg"]).pick_file(){match read_image(&path){Ok(b)=>{self.extra.media[i].temporary=Some(b);if self.extra.media[i].bytes.is_none(){self.extra.media[i].path=Some(path);}self.extra.media[i].texture=None;},Err(e)=>self.toast=e}}}
- if self.extra.media[i].temporary.is_some()&&ui.button("임시 보기 닫기").clicked(){self.extra.media[i].temporary=None;self.extra.media[i].texture=None;}
- });});});}});
+        ui.horizontal_wrapped(|ui| {
+            for i in ids {
+                ui.push_id(i, |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.vertical(|ui| self.image_card(ui, i));
+                    });
+                });
+            }
+        });
         ui.label(RichText::new("저장 위치와 비운 상태는 앱 실행 중에만 유지됩니다. 프로그램 종료 후 복원은 저장 기능 연결 단계에서 지원합니다.").small().color(MUTED));
     }
     pub fn real_bookmark_gallery(&mut self, ui: &mut egui::Ui) {
@@ -389,6 +389,211 @@ mod filesystem_tests {
         write_new(&p, b"original").unwrap();
         assert!(write_new(&p, b"replacement").is_err());
         assert_eq!(std::fs::read(&p).unwrap(), b"original");
+        std::fs::remove_file(p).unwrap();
+    }
+}
+impl App {
+    fn image_card(&mut self, ui: &mut egui::Ui, i: usize) {
+        ui.set_width(235.);
+        let thumb_only = self.extra.media[i].displayed().is_none();
+        let m = &mut self.extra.media[i];
+        if m.texture.is_none() {
+            if let Some(bytes) = m.displayed().or(m.thumbnail.as_deref()) {
+                if let Ok(img) = decode(bytes) {
+                    let ci = egui::ColorImage::from_rgba_unmultiplied(
+                        [img.width() as usize, img.height() as usize],
+                        img.as_raw(),
+                    );
+                    m.texture = Some(ui.ctx().load_texture(
+                        format!("image-{i}"),
+                        ci,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+        }
+        let clicked = if let Some(t) = &m.texture {
+            ui.add(
+                egui::Image::new(t)
+                    .fit_to_exact_size(Vec2::new(235., 147.))
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text(if thumb_only {
+                "썸네일 · 클릭하여 백업 찾기"
+            } else {
+                "클릭하면 이미지가 복사됩니다"
+            })
+            .clicked()
+        } else {
+            ui.add_sized([235., 147.], egui::Button::new("백업 이미지 찾기"))
+                .clicked()
+        };
+        if clicked {
+            if thumb_only {
+                self.extra.missing_image = Some(i);
+            } else {
+                let b = self.extra.media[i].displayed().map(ToOwned::to_owned);
+                self.toast = match b
+                    .ok_or("원본 없음".into())
+                    .and_then(|b| self.copy_image_bytes(&b))
+                {
+                    Ok(()) => "이미지를 복사했습니다".into(),
+                    Err(e) => e,
+                };
+            }
+        }
+        ui.strong(&self.extra.media[i].name);
+        ui.label(format!(
+            "{} · {}",
+            self.extra.media[i].date,
+            if thumb_only {
+                "썸네일만 보관"
+            } else {
+                "원본 이미지"
+            }
+        ));
+        if save_icon(ui).clicked() {
+            if thumb_only {
+                self.extra.missing_image = Some(i);
+            } else if let Some(path) = rfd::FileDialog::new()
+                .add_filter("PNG", &["png"])
+                .set_file_name(format!("image-{}.png", i + 1))
+                .save_file()
+            {
+                let result = self.extra.media[i]
+                    .displayed()
+                    .ok_or("이미지 없음".into())
+                    .and_then(decode)
+                    .and_then(png)
+                    .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
+                match result {
+                    Ok(()) => {
+                        self.extra.media[i].path = Some(path);
+                        self.toast = "이미지를 저장했습니다".into()
+                    }
+                    Err(e) => self.toast = e,
+                }
+            }
+        }
+        if let Some(path) = self.extra.media[i].path.clone() {
+            if self.extra.media[i].bytes.is_some()
+                && ui.button("백업 확인 후 원본 용량 정리").clicked()
+            {
+                self.toast = match self.archive_asset(i, &path) {
+                    Ok(()) => "원본을 정리하고 작은 썸네일을 남겼습니다".into(),
+                    Err(e) => format!("정리 중단·원본 유지: {e}"),
+                };
+            }
+        }
+        if self.extra.media[i].temporary.is_some() && ui.button("백업 보기 닫기").clicked() {
+            self.extra.media[i].temporary = None;
+            self.extra.media[i].texture = None;
+        }
+    }
+    fn archive_asset(&mut self, i: usize, path: &Path) -> Result<(), String> {
+        let b = read_image(path)?;
+        let external = decode(&b)?;
+        let original = decode(self.extra.media[i].bytes.as_deref().ok_or("원본 없음")?)?;
+        if original != external {
+            return Err("백업 파일이 원본과 다릅니다".into());
+        }
+        let thumb = png(image::imageops::thumbnail(&original, 120, 75))?;
+        let m = &mut self.extra.media[i];
+        m.thumbnail = Some(thumb);
+        m.bytes = None;
+        m.temporary = None;
+        m.texture = None;
+        Ok(())
+    }
+    pub fn missing_image_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(i) = self.extra.missing_image {
+            egui::Window::new("이미지 백업 찾기")
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label("용량 관리로 원본 이미지가 정리되었습니다. 백업 파일을 찾아주세요.");
+                    if let Some(path) = self.extra.media[i].path.clone() {
+                        ui.label(path.display().to_string());
+                        if ui.button("기억한 백업에서 열기").clicked() {
+                            match read_image(&path) {
+                                Ok(b) => {
+                                    self.extra.media[i].temporary = Some(b);
+                                    self.extra.media[i].texture = None;
+                                    self.extra.missing_image = None
+                                }
+                                Err(e) => self.toast = e,
+                            }
+                        }
+                    }
+                    if ui.button("백업 파일 찾기…").clicked() {
+                        let mut dialog =
+                            rfd::FileDialog::new().add_filter("이미지", &["png", "jpg", "jpeg"]);
+                        if let Some(parent) =
+                            self.extra.media[i].path.as_ref().and_then(|p| p.parent())
+                        {
+                            dialog = dialog.set_directory(parent);
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            match read_image(&path) {
+                                Ok(b) => {
+                                    self.extra.media[i].temporary = Some(b);
+                                    self.extra.media[i].path = Some(path);
+                                    self.extra.media[i].texture = None;
+                                    self.extra.missing_image = None
+                                }
+                                Err(e) => self.toast = e,
+                            }
+                        }
+                    }
+                    if ui.button("닫기").clicked() {
+                        self.extra.missing_image = None;
+                    }
+                });
+        }
+    }
+}
+fn save_icon(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(32., 28.), egui::Sense::click());
+    r.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "다른 이름으로 저장")
+    });
+    let c = rect.center();
+    let color = ui.visuals().text_color();
+    let stroke = egui::Stroke::new(1.5_f32, color);
+    ui.painter()
+        .line_segment([c - Vec2::new(0., 7.), c + Vec2::new(0., 3.)], stroke);
+    ui.painter()
+        .line_segment([c + Vec2::new(-4., 0.), c + Vec2::new(0., 4.)], stroke);
+    ui.painter()
+        .line_segment([c + Vec2::new(4., 0.), c + Vec2::new(0., 4.)], stroke);
+    ui.painter()
+        .line_segment([c + Vec2::new(-7., 7.), c + Vec2::new(7., 7.)], stroke);
+    r.on_hover_text("다른 이름으로 저장")
+}
+#[cfg(test)]
+mod thumbnail_tests {
+    use super::*;
+    #[test]
+    fn archive_keeps_thumbnail_and_rejects_wrong_backup() {
+        let mut a = App::sample(Local::now().date_naive());
+        a.extra.media = vec![sample_asset(0)];
+        let p = std::env::temp_dir().join(format!(
+            "memonoking-archive-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let original = a.extra.media[0].bytes.clone().unwrap();
+        std::fs::write(&p, sample_asset(1).bytes.unwrap()).unwrap();
+        assert!(a.archive_asset(0, &p).is_err());
+        assert_eq!(a.extra.media[0].bytes.as_ref().unwrap(), &original);
+        std::fs::write(&p, &original).unwrap();
+        a.archive_asset(0, &p).unwrap();
+        assert!(a.extra.media[0].bytes.is_none());
+        let thumb = decode(a.extra.media[0].thumbnail.as_ref().unwrap()).unwrap();
+        assert!(thumb.width() <= 120 && thumb.height() <= 75);
+        assert_eq!(std::fs::read(&p).unwrap(), original);
         std::fs::remove_file(p).unwrap();
     }
 }
