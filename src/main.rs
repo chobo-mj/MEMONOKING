@@ -1,4 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod catalog;
+mod composer;
+mod content_collections;
+mod desktop;
 mod dragging;
 mod extras;
 mod icons;
@@ -27,15 +31,11 @@ const NO_PROJECT: usize = usize::MAX;
 const INK: Color32 = Color32::from_rgb(48, 47, 44);
 const MUTED: Color32 = Color32::from_rgb(133, 130, 124);
 const ACCENT: Color32 = Color32::from_rgb(184, 72, 53);
-const LABELS: [&str; 3] = ["개인", "프로젝트", "회의"];
-const COLORS: [Color32; 3] = [
-    Color32::from_rgb(117, 150, 125),
-    Color32::from_rgb(133, 121, 177),
-    Color32::from_rgb(201, 151, 84),
-];
 #[derive(Clone)]
 struct NoteDrag;
 struct App {
+    desktop: desktop::Desktop,
+    catalog: catalog::Catalog,
     studio: studio::Studio,
     extra: extras::Extra,
     sources: Vec<dragging::Source>,
@@ -59,7 +59,6 @@ struct App {
     project_filter: Option<usize>,
     recurring: bool,
     board_filter: usize,
-    label_filter: usize,
     picked: Vec<usize>,
     project_name: String,
     link_source: Option<usize>,
@@ -88,6 +87,34 @@ impl App {
                 .unwrap()
                 .insert(0, "korean".into());
         }
+        for (name, file, index) in [
+            ("맑은 고딕", "malgun.ttf", 0),
+            ("맑은 고딕 Bold", "malgunbd.ttf", 0),
+            ("굴림", "gulim.ttc", 0),
+            ("돋움", "gulim.ttc", 2),
+            ("바탕", "batang.ttc", 0),
+            ("궁서체", "batang.ttc", 2),
+        ] {
+            if let Ok(bytes) = std::fs::read(format!("C:/Windows/Fonts/{file}")) {
+                let mut data = egui::FontData::from_owned(bytes);
+                data.index = index;
+                fonts.font_data.insert(name.into(), data.into());
+                fonts.families.insert(
+                    egui::FontFamily::Name(name.into()),
+                    vec![name.into(), "korean".into()],
+                );
+            }
+        }
+        let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+        for (key, entries) in &mut fonts.families {
+            if matches!(key, egui::FontFamily::Name(_)) {
+                for f in &fallback {
+                    if !entries.contains(f) {
+                        entries.push(f.clone());
+                    }
+                }
+            }
+        }
         cc.egui_ctx.set_fonts(fonts);
         let mut a = Self::sample(Local::now().date_naive());
         a.hotkeys = GlobalHotKeyManager::new().ok();
@@ -96,6 +123,8 @@ impl App {
     }
     fn sample(today: NaiveDate) -> Self {
         Self {
+            desktop: desktop::Desktop::default(),
+            catalog: catalog::Catalog::default(),
             extra: extras::Extra::default(),
             studio: studio::Studio::default(),
             sources: vec![],
@@ -119,7 +148,6 @@ impl App {
             project_filter: None,
             recurring: true,
             board_filter: 0,
-            label_filter: 0,
             picked: vec![],
             project_name: "새 프로젝트".into(),
             link_source: None,
@@ -178,6 +206,12 @@ impl App {
         v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
         v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
         ctx.set_visuals(v);
+        let selected = egui::FontFamily::Name(self.desktop.font.clone().into());
+        let family = if ctx.fonts(|f| f.families().contains(&selected)) {
+            selected
+        } else {
+            egui::FontFamily::Proportional
+        };
         ctx.style_mut(|s| {
             s.spacing.item_spacing = Vec2::new(8., 8.);
             s.spacing.button_padding = Vec2::new(9., 6.);
@@ -189,6 +223,12 @@ impl App {
                 .insert(egui::TextStyle::Small, egui::FontId::proportional(12.));
             s.text_styles
                 .insert(egui::TextStyle::Heading, egui::FontId::proportional(25.));
+            for (style, font) in &mut s.text_styles {
+                font.family = family.clone();
+                if *style == egui::TextStyle::Body {
+                    font.size = self.desktop.font_size * 4. / 3.;
+                }
+            }
         });
     }
     fn apply_shortcuts(&mut self) {
@@ -266,6 +306,10 @@ impl App {
             .unwrap_or_else(|| "사용 안 함".into())
     }
     fn open_note(&mut self, i: usize) {
+        if self.data.notes[i].locked {
+            self.ask_unlock(i, false);
+            return;
+        }
         self.active = i;
         self.extra.edit_occurrence = self.data.notes[i]
             .occurrence_completed
@@ -307,6 +351,9 @@ impl Drop for App {
     }
 }
 impl eframe::App for App {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0., 0., 0., 0.]
+    }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.theme(ctx);
         self.drag_input(ctx);
@@ -341,6 +388,20 @@ impl eframe::App for App {
             self.extra.picker = None;
             self.link_source = None;
         }
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::H)
+        }) {
+            for w in self.studio.windows.values_mut() {
+                w.open = false;
+            }
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::P)) {
+            self.desktop.project_popup = true;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::T)) {
+            let i = self.catalog.selected.unwrap_or(self.active);
+            self.data.notes[i].topmost = !self.data.notes[i].topmost;
+        }
         if self.sidebar {
             egui::SidePanel::left("sidebar")
                 .exact_width(220.)
@@ -370,6 +431,7 @@ impl eframe::App for App {
                     if ui
                         .add(
                             egui::TextEdit::singleline(&mut self.search)
+                                .id_salt("global_search")
                                 .hint_text("제목 · 본문 검색"),
                         )
                         .changed()
@@ -397,7 +459,7 @@ impl eframe::App for App {
                                 "나만의 위키",
                                 "오늘",
                                 "다음",
-                                "수집함 · 보드",
+                                "전체메모",
                                 "캘린더",
                                 "편의기능",
                             ]
@@ -457,7 +519,11 @@ impl eframe::App for App {
                                 if !self.visible(i)
                                     || (!self.search.is_empty()
                                         && !self.data.notes[i].title.contains(&self.search)
-                                        && !self.data.notes[i].body.contains(&self.search))
+                                        && (self.data.notes[i].locked
+                                            || !self.data.notes[i]
+                                                .document
+                                                .plain_text(&self.data.notes[i].body)
+                                                .contains(&self.search)))
                                 {
                                     continue;
                                 }
@@ -528,7 +594,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(20.);
             if self.page == 4 {
-                self.board(ui);
+                self.catalog_ui(ui);
             } else {
                 egui::ScrollArea::vertical()
                     .id_salt(("page_scroll", self.page))
@@ -583,8 +649,8 @@ impl eframe::App for App {
         let mut open = self.settings;
         egui::Window::new("설정")
             .open(&mut open)
-            .default_width(520.)
-            .show(ctx, |ui| self.settings_ui(ui));
+            .default_width(780.)
+            .show(ctx, |ui| self.ppt_settings(ui));
         self.settings = open;
         if self.studio.help {
             let mut open = true;
@@ -629,6 +695,7 @@ impl eframe::App for App {
         }
         self.detached_note(ctx);
         self.extra_windows(ctx);
+        self.desktop_dialogs(ctx);
     }
 }
 fn shorten(s: &str, n: usize) -> String {

@@ -19,15 +19,6 @@ pub fn project_label(filter: Option<usize>, names: &[String]) -> &str {
         Some(p) => names.get(p).map(String::as_str).unwrap_or("프로젝트 없음"),
     }
 }
-pub fn body_input(ui: &mut egui::Ui, text: &mut String, rows: usize, hint: &str) -> egui::Response {
-    ui.add(
-        egui::TextEdit::multiline(text)
-            .frame(false)
-            .desired_width(f32::INFINITY)
-            .desired_rows(rows)
-            .hint_text(hint),
-    )
-}
 impl App {
     pub fn done_at(&mut self, i: usize, day: Option<NaiveDate>, value: bool) {
         let n = &self.data.notes[i];
@@ -257,7 +248,11 @@ impl App {
             {
                 cols[1].heading(&self.data.notes[i].title);
                 cols[1].separator();
-                cols[1].label(&self.data.notes[i].body);
+                cols[1].label(if self.data.notes[i].locked {
+                    "잠긴 메모"
+                } else {
+                    &self.data.notes[i].body
+                });
                 cols[1].add_space(15.);
                 cols[1].strong("댓글");
                 self.comments(&mut cols[1], i, 0);
@@ -362,7 +357,7 @@ impl App {
                     if r.clicked() {
                         self.extra.wiki_selected = Some(i);
                     }
-                    if !self.data.notes[i].wiki_comments.is_empty() {
+                    if !self.data.notes[i].locked && !self.data.notes[i].wiki_comments.is_empty() {
                         egui::CollapsingHeader::new(format!(
                             "댓글 {}개",
                             self.data.notes[i].wiki_comments.len()
@@ -461,7 +456,11 @@ impl App {
                 if let Some(d) = d {
                     ui.label(RichText::new(format!("일정 날짜 {d}")).small().color(MUTED));
                 }
-                ui.label(&self.data.notes[i].body);
+                ui.label(if self.data.notes[i].locked {
+                    "잠긴 메모"
+                } else {
+                    &self.data.notes[i].body
+                });
                 ui.horizontal(|ui| {
                     ui.label(t.format("%Y-%m-%d %H:%M").to_string());
                     if ui.button("내용 / 완료 시각 수정").clicked() {
@@ -527,7 +526,11 @@ impl App {
                     if let Some(d) = &self.extra.swatch_drag {
                         let delta = outer + pos.to_vec2() - d.origin;
                         if delta.length() > 3. {
-                            let (window, size) = swatch_geometry(d, delta);
+                            let (window, size) = swatch_geometry_with_shift(
+                                d,
+                                delta,
+                                ctx.input(|i| i.modifiers.shift),
+                            );
                             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(window));
                             if d.corner.is_some() {
                                 self.extra.swatch_size = size;
@@ -545,27 +548,35 @@ impl App {
                     if let Some(d) = self.extra.swatch_drag.take() {
                         let delta = outer + pos.to_vec2() - d.origin;
                         if delta.length() > 3. {
-                            let (window, size) = swatch_geometry(&d, delta);
+                            let (window, size) = swatch_geometry_with_shift(
+                                &d,
+                                delta,
+                                ctx.input(|i| i.modifiers.shift),
+                            );
                             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(window));
                             if d.corner.is_some() {
                                 self.extra.swatch_size = size;
                                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                             }
-                        } else if d.corner.is_none() {
-                            self.data.notes[i].fold = 0;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        ui.interact(
-            rect.shrink(9.),
-            ui.id().with("swatch_move"),
-            egui::Sense::click_and_drag(),
-        )
-        .on_hover_cursor(egui::CursorIcon::Grab)
-        .on_hover_text("클릭: 펼치기 · 드래그: 이동 · 모서리: 크기 조절");
+        let restore = ui
+            .interact(
+                rect.shrink(9.),
+                ui.id().with("swatch_move"),
+                egui::Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::Grab)
+            .on_hover_text(
+                "두 번 클릭: 스티커 펼치기 · 드래그: 이동 · 모서리: 크기 조절 · Shift: 정사각형",
+            );
+        if restore.double_clicked() {
+            self.data.notes[i].fold = 0;
+        }
         for (k, p, cursor) in [
             (0, rect.min, egui::CursorIcon::ResizeNwSe),
             (
@@ -688,6 +699,20 @@ pub struct SwatchDrag {
     window: egui::Pos2,
     size: Vec2,
     corner: Option<(bool, bool)>,
+}
+fn swatch_geometry_with_shift(d: &SwatchDrag, delta: Vec2, shift: bool) -> (egui::Pos2, Vec2) {
+    let result = swatch_geometry(d, delta);
+    if !shift || d.corner.is_none() {
+        return result;
+    }
+    let size = Vec2::splat(result.1.x.max(result.1.y));
+    let (left, top) = d.corner.unwrap();
+    let pos = d.window
+        + Vec2::new(
+            if left { d.size.x - size.x } else { 0. },
+            if top { d.size.y - size.y } else { 0. },
+        );
+    (pos, size)
 }
 fn swatch_geometry(d: &SwatchDrag, delta: Vec2) -> (egui::Pos2, Vec2) {
     if let Some((left, top)) = d.corner {

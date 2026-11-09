@@ -1,8 +1,13 @@
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use eframe::egui::Vec2;
+#[derive(Clone)]
 pub struct Note {
     pub title: String,
     pub body: String,
+    pub document: crate::composer::Document,
+    pub reminder: Option<NaiveDateTime>,
+    pub locked: bool,
+    pub purged: bool,
     pub date: Option<NaiveDate>,
     pub duration: u8,
     pub occurrence_completed: std::collections::BTreeMap<NaiveDate, NaiveDateTime>,
@@ -12,7 +17,6 @@ pub struct Note {
     pub completed: Option<NaiveDateTime>,
     pub starred: bool,
     pub recurring: bool,
-    pub label: usize,
     pub project: Option<usize>,
     pub parents: Vec<usize>,
     pub created: NaiveDateTime,
@@ -34,6 +38,10 @@ impl Note {
         Self {
             title: title.into(),
             body: "아이디어와 준비할 내용을 여기에 정리하세요.".into(),
+            document: Default::default(),
+            reminder: None,
+            locked: false,
+            purged: false,
             date,
             duration: 1,
             occurrence_completed: Default::default(),
@@ -43,7 +51,6 @@ impl Note {
             completed: None,
             starred: false,
             recurring: false,
-            label: i % 3,
             project: None,
             parents: vec![],
             created: Local::now().naive_local(),

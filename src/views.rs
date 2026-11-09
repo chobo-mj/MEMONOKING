@@ -71,13 +71,22 @@ impl App {
                         .unwrap_or_default();
                     ui.label(
                         RichText::new(format!(
-                            "{date}{} · {}{project}",
-                            if n.recurring { "  ↻" } else { "" },
-                            LABELS[n.label]
+                            "{date}{}{project}",
+                            if n.recurring { "  ↻" } else { "" }
                         ))
                         .small()
-                        .color(COLORS[n.label]),
+                        .color(MUTED),
                     );
+                    if self.desktop.show_preview && self.split && !n.locked {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(n.body.replace('\n', " "))
+                                    .small()
+                                    .color(MUTED),
+                            )
+                            .truncate(),
+                        );
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("편집").clicked() {
@@ -122,6 +131,10 @@ impl App {
         });
     }
     pub fn agenda(&mut self, ui: &mut egui::Ui, mode: usize) {
+        if !self.split && mode == 0 {
+            self.detail_workspace(ui, mode);
+            return;
+        }
         let today = Local::now().date_naive();
         let name = match mode {
             1 => "나만의 위키",
@@ -159,6 +172,8 @@ impl App {
         let mut rows = vec![];
         for (i, n) in self.data.notes.iter().enumerate() {
             if !self.matches_search(i)
+                || (self.desktop.hide_locked && n.locked)
+                || (self.desktop.hide_completed && n.done && !self.extra.search_mode)
                 || (!self.recurring && n.recurring)
                 || !crate::refinements::project_match(self.project_filter, n.project)
             {
@@ -236,45 +251,50 @@ impl App {
     }
     pub fn calendar(&mut self, ui: &mut egui::Ui) {
         let today = Local::now().date_naive();
-        ui.horizontal(|ui| {
-            ui.heading(self.month.format("%Y년 %m월").to_string());
-            if ui.small_button("〈").clicked() {
+        ui.horizontal_wrapped(|ui| {
+            if icons::icon_button(ui, icons::Icon::ChevronLeft, "이전 달").clicked() {
                 self.month = (self.month - Duration::days(1)).with_day(1).unwrap();
             }
-            if ui.small_button("〉").clicked() {
+            ui.heading(self.month.format("%Y년 %m월").to_string());
+            if icons::icon_button(ui, icons::Icon::ChevronRight, "다음 달").clicked() {
                 self.month = (self.month + Duration::days(32)).with_day(1).unwrap();
             }
-            if ui.small_button("오늘").clicked() {
+            if ui.button("오늘").clicked() {
                 self.month = today.with_day(1).unwrap();
                 self.day = today;
             }
         });
-        ui.label(
-            RichText::new("날짜로 드래그 · 일정 제목을 눌러 편집")
-                .small()
-                .color(MUTED),
-        );
-        ui.add_space(10.);
+        ui.horizontal(|ui| {
+            for (i, label) in ["작성일", "일정", "알람"].iter().enumerate() {
+                ui.selectable_value(&mut self.desktop.calendar_basis, i, *label);
+            }
+        });
+        ui.add_space(8.);
         let width = ui.available_width().max(280.);
         let col = width / 7.;
         let (header, _) = ui.allocate_exact_size(Vec2::new(width, 24.), Sense::hover());
-        for (i, n) in ["일", "월", "화", "수", "목", "금", "토"]
+        for (i, label) in ["일", "월", "화", "수", "목", "금", "토"]
             .iter()
             .enumerate()
         {
             ui.painter().text(
                 header.min + Vec2::new(i as f32 * col + 8., 8.),
                 egui::Align2::LEFT_CENTER,
-                n,
+                label,
                 egui::FontId::proportional(12.),
-                MUTED,
+                if i == 0 {
+                    ACCENT
+                } else if i == 6 {
+                    Color32::from_rgb(65, 119, 205)
+                } else {
+                    MUTED
+                },
             );
         }
         let offset = self.month.weekday().num_days_from_sunday() as usize;
         let next = (self.month + Duration::days(32)).with_day(1).unwrap();
-        let days = (next - self.month).num_days() as usize;
-        let rows = (days + offset).div_ceil(7);
-        let height = if width < 580. { 104. } else { 118. };
+        let rows = ((next - self.month).num_days() as usize + offset).div_ceil(7);
+        let height = if width < 580. { 108. } else { 128. };
         let (all, _) =
             ui.allocate_exact_size(Vec2::new(width, rows as f32 * height), Sense::hover());
         for slot in 0..rows * 7 {
@@ -287,7 +307,7 @@ impl App {
                 if self.dark {
                     Color32::from_rgb(43, 39, 34)
                 } else {
-                    Color32::from_rgb(255, 249, 240)
+                    Color32::from_rgb(255, 250, 239)
                 }
             } else {
                 ui.visuals().panel_fill
@@ -301,7 +321,7 @@ impl App {
                     if self.dark {
                         Color32::from_gray(65)
                     } else {
-                        Color32::from_gray(227)
+                        Color32::from_gray(232)
                     },
                 ),
                 egui::StrokeKind::Inside,
@@ -315,78 +335,126 @@ impl App {
                 rect: rect.intersect(ui.clip_rect()),
                 kind: dragging::Destination::Date(day),
             });
-            let drop = ui.interact(rect, ui.id().with(("day", day)), Sense::click());
-            if drop.clicked() {
+            let r = ui.interact(rect, ui.id().with(("day", day)), Sense::click());
+            if r.clicked() {
                 self.day = day;
             }
-            if drop.dnd_hover_payload::<NoteDrag>().is_some() {
+            if r.dnd_hover_payload::<NoteDrag>().is_some() {
                 ui.painter().rect_stroke(
                     rect.shrink(2.),
-                    3.,
+                    4.,
                     Stroke::new(2.0_f32, ACCENT),
                     egui::StrokeKind::Inside,
                 );
             }
-
+            let holiday = matches!(
+                (day.month(), day.day()),
+                (1, 1) | (3, 1) | (5, 5) | (6, 6) | (8, 15) | (10, 3) | (10, 9) | (12, 25)
+            );
+            let weekday = day.weekday().num_days_from_sunday();
+            let datecolor = if holiday || weekday == 0 {
+                ACCENT
+            } else if weekday == 6 {
+                Color32::from_rgb(65, 119, 205)
+            } else {
+                if self.dark {
+                    Color32::from_gray(220)
+                } else {
+                    INK
+                }
+            };
+            if day == today {
+                ui.painter()
+                    .circle_filled(rect.min + Vec2::new(14., 15.), 11., ACCENT);
+            }
             ui.painter().text(
-                rect.min + Vec2::new(8., 10.),
+                rect.min + Vec2::new(9., 9.),
                 egui::Align2::LEFT_TOP,
                 day.day().to_string(),
                 egui::FontId::proportional(12.),
-                if day == today { ACCENT } else { MUTED },
+                if day == today {
+                    Color32::WHITE
+                } else {
+                    datecolor
+                },
             );
+            if ui.rect_contains_pointer(rect) {
+                let plus =
+                    Rect::from_min_size(rect.right_top() + Vec2::new(-26., 4.), Vec2::splat(22.));
+                overlay(ui, plus, slot + 25000, |ui| {
+                    if icons::icon_button(ui, icons::Icon::Plus, "이 날짜의 새 스티커").clicked()
+                    {
+                        let i = self.new_sticker();
+                        self.data.notes[i].date = Some(day);
+                        self.day = day;
+                    }
+                });
+            }
             let mut ids: Vec<_> = self
                 .data
                 .notes
                 .iter()
                 .enumerate()
-                .filter(|(i, n)| self.visible(*i) && n.occurs(day))
+                .filter(|(i, n)| self.visible(*i) && self.calendar_matches(n, day))
                 .map(|(i, _)| i)
                 .collect();
             ids.sort_by_key(|&i| self.data.notes[i].time);
             let count = ids.len();
             for (row, i) in ids.into_iter().take(3).enumerate() {
-                let r = Rect::from_min_size(
-                    rect.min + Vec2::new(4., 29. + row as f32 * 24.),
+                let rect = Rect::from_min_size(
+                    rect.min + Vec2::new(4., 31. + row as f32 * 24.),
                     Vec2::new(col - 8., 22.),
                 );
-                overlay(ui, r, i + 1000, |ui| {
+                overlay(ui, rect, i + 1000, |ui| {
                     let n = &self.data.notes[i];
-                    let max = ((col - 18.) / 12.) as usize;
-                    let title = shorten(&n.title, max.max(2));
-                    let t = RichText::new(title).size(12.).color(if self.dark {
+                    let max = ((col - 18.) / 11.) as usize;
+                    let label = shorten(&n.title, max.max(2));
+                    let text = RichText::new(if label.is_empty() {
+                        "제목 없음".into()
+                    } else {
+                        label
+                    })
+                    .size(12.)
+                    .color(if self.dark {
                         Color32::from_gray(235)
                     } else {
                         INK
                     });
-                    let t = if n.done_on(Some(day)) {
-                        t.strikethrough()
+                    let text = if n.done_on(Some(day)) {
+                        text.strikethrough()
                     } else {
-                        t
+                        text
                     };
-                    let res = ui
+                    let color = if self.dark {
+                        Color32::from_rgb(52, 50, 43)
+                    } else {
+                        n.color.gamma_multiply(0.98)
+                    };
+                    let response = ui
                         .add_sized(
-                            r.size(),
-                            egui::Button::new(t)
+                            rect.size(),
+                            egui::Button::new(text)
+                                .truncate()
                                 .small()
-                                .fill(if self.dark {
-                                    Color32::from_rgb(48, 51, 46)
-                                } else {
-                                    Color32::from_rgb(235, 240, 230)
-                                })
+                                .fill(color)
                                 .sense(Sense::click_and_drag()),
                         )
                         .on_hover_text(&n.title);
-                    res.dnd_set_drag_payload(NoteDrag);
-                    self.drag_source_on(ui, &res, i, Some(day));
-                    if res.clicked() {
-                        self.open_note_on(i, Some(day));
+                    response.dnd_set_drag_payload(NoteDrag);
+                    let occurrence = if self.desktop.calendar_basis == 1 {
+                        Some(day)
+                    } else {
+                        None
+                    };
+                    self.drag_source_on(ui, &response, i, occurrence);
+                    if response.clicked() {
+                        self.open_sticker(i, occurrence);
                     }
                 });
             }
             if count > 3 {
                 ui.painter().text(
-                    rect.left_bottom() + Vec2::new(7., -3.),
+                    rect.left_bottom() + Vec2::new(7., -4.),
                     egui::Align2::LEFT_BOTTOM,
                     format!("+ {}개", count - 3),
                     egui::FontId::proportional(11.),
@@ -397,8 +465,9 @@ impl App {
         ui.add_space(10.);
         ui.horizontal(|ui| {
             ui.strong(self.day.format("%m월 %d일").to_string());
-            if ui.button("+ 일정 추가").clicked() {
-                self.add_note(Some(self.day));
+            if ui.button("+ 새 스티커").clicked() {
+                let i = self.new_sticker();
+                self.data.notes[i].date = Some(self.day);
             }
         });
         let ids: Vec<_> = self
@@ -406,11 +475,18 @@ impl App {
             .notes
             .iter()
             .enumerate()
-            .filter(|(i, n)| self.visible(*i) && n.occurs(self.day))
+            .filter(|(i, n)| self.visible(*i) && self.calendar_matches(n, self.day))
             .map(|(i, _)| i)
             .collect();
         for i in ids {
             self.task_row_on(ui, i, Some(self.day));
+        }
+    }
+    fn calendar_matches(&self, n: &Note, day: NaiveDate) -> bool {
+        match self.desktop.calendar_basis {
+            0 => n.created.date() == day,
+            2 => n.reminder.is_some_and(|t| t.date() == day),
+            _ => n.occurs(day),
         }
     }
     pub fn note_editor(&mut self, ui: &mut egui::Ui) {
@@ -460,7 +536,7 @@ impl App {
         ui.add_space(8.);
         self.date_controls(ui, i);
         ui.add_space(12.);
-        ui.label(RichText::new("분류").small().color(MUTED));
+        ui.label(RichText::new("프로젝트").small().color(MUTED));
         let n = &mut self.data.notes[i];
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("memo_project")
@@ -479,14 +555,8 @@ impl App {
                         }
                     }
                 });
-            egui::ComboBox::from_id_salt("memo_label")
-                .selected_text(LABELS[n.label])
-                .show_ui(ui, |ui| {
-                    for (i, name) in LABELS.iter().enumerate() {
-                        ui.selectable_value(&mut n.label, i, *name);
-                    }
-                });
             if n.wiki {
+                ui.label(RichText::new("위키 폴더").small().color(MUTED));
                 egui::ComboBox::from_id_salt("wiki_folder_assignment")
                     .selected_text(
                         n.folder
@@ -504,7 +574,9 @@ impl App {
         ui.add_space(14.);
         ui.separator();
         ui.add_space(12.);
-        crate::refinements::body_input(ui, &mut n.body, 10, "생각이나 할 일을 적어보세요…");
+        n.document.toolbar_visible = true;
+        crate::composer::show(ui, &mut n.body, &mut n.document, ("full_editor", i));
+        self.consume_body_project(i);
         self.consume_project_header(i);
         let related: Vec<_> = self
             .data
@@ -595,7 +667,10 @@ impl App {
             8 => {
                 ui.heading("이미지 모아보기");
                 ui.horizontal_wrapped(|ui| {
-                    for (c, t) in COLORS.iter().zip(["영감", "기록", "생각"]) {
+                    for (c, t) in [PALETTE[0], PALETTE[1], PALETTE[2]]
+                        .iter()
+                        .zip(["영감", "기록", "생각"])
+                    {
                         egui::Frame::NONE.fill(*c).inner_margin(35.).show(ui, |ui| {
                             ui.set_min_size(Vec2::new(150., 100.));
                             ui.label(RichText::new(t).color(Color32::WHITE));
@@ -649,20 +724,8 @@ impl App {
             .color(MUTED),
         );
         ui.horizontal_wrapped(|ui| {
-            for (i, t) in ["모든 메모", "선택한 메모", "라벨별 보기"]
-                .iter()
-                .enumerate()
-            {
+            for (i, t) in ["모든 메모", "선택한 메모"].iter().enumerate() {
                 ui.selectable_value(&mut self.board_filter, i, *t);
-            }
-            if self.board_filter == 2 {
-                egui::ComboBox::from_id_salt("board_label")
-                    .selected_text(LABELS[self.label_filter])
-                    .show_ui(ui, |ui| {
-                        for (i, t) in LABELS.iter().enumerate() {
-                            ui.selectable_value(&mut self.label_filter, i, *t);
-                        }
-                    });
             }
             if ui.button("+ 메모").clicked() {
                 self.add_note(None);
@@ -741,7 +804,6 @@ impl App {
                         self.visible(i)
                             && match self.board_filter {
                                 1 => self.picked.contains(&i),
-                                2 => self.data.notes[i].label == self.label_filter,
                                 _ => true,
                             }
                     })
@@ -769,8 +831,11 @@ impl App {
                         if ids.contains(&p) {
                             let a = rects[p].center_bottom();
                             let b = rects[i].center_top();
-                            ui.painter()
-                                .arrow(a, b - a, Stroke::new(2.0_f32, COLORS[1]));
+                            ui.painter().arrow(
+                                a,
+                                b - a,
+                                Stroke::new(2.0_f32, Color32::from_rgb(133, 121, 177)),
+                            );
                         }
                     }
                 }
@@ -799,7 +864,7 @@ impl App {
                     ui.painter().rect_filled(
                         Rect::from_min_size(rect.min, Vec2::new(size.x, 5.)),
                         3.,
-                        COLORS[self.data.notes[i].label],
+                        self.data.notes[i].color,
                     );
                     overlay(ui, rect.shrink(11.), i + 2000, |ui| {
                         ui.set_clip_rect(ui.clip_rect().intersect(rect));
@@ -838,21 +903,23 @@ impl App {
                             }
                         });
                         ui.label(
-                            RichText::new(shorten(&self.data.notes[i].body, 35))
-                                .small()
-                                .color(MUTED),
+                            RichText::new(if self.data.notes[i].locked {
+                                "잠긴 메모".into()
+                            } else {
+                                shorten(&self.data.notes[i].body, 35)
+                            })
+                            .small()
+                            .color(MUTED),
                         );
                         let n = &self.data.notes[i];
                         ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                LABELS[n.label],
+                            RichText::new(
                                 n.project
                                     .map(|p| self.data.projects[p].as_str())
-                                    .unwrap_or("프로젝트 없음")
-                            ))
+                                    .unwrap_or("프로젝트 없음"),
+                            )
                             .small()
-                            .color(COLORS[n.label]),
+                            .color(MUTED),
                         );
                         if let Some(&p) = n.parents.first() {
                             ui.label(

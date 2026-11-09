@@ -16,6 +16,8 @@ pub struct Window {
     pub occurrence: Option<NaiveDate>,
     pub schedule_start: Option<NaiveDate>,
     full_size: Vec2,
+    title_width: f32,
+    skip_title: bool,
     sticker_size: Vec2,
     swatch_size: Vec2,
     applied: Option<Mode>,
@@ -35,6 +37,8 @@ impl Window {
             occurrence: None,
             schedule_start: None,
             full_size: Vec2::new(620., 720.),
+            title_width: 360.,
+            skip_title: false,
             sticker_size: Vec2::splat(360.),
             swatch_size: Vec2::splat(48.),
             applied: None,
@@ -62,9 +66,10 @@ impl Window {
     }
     pub fn fold(&mut self) {
         self.mode = match self.mode {
-            Mode::Editor if self.sticker_preferred => Mode::Swatch,
+            Mode::Editor | Mode::Sticker if self.skip_title => Mode::Swatch,
             Mode::Editor => Mode::Title,
-            Mode::Title | Mode::Sticker => Mode::Swatch,
+            Mode::Sticker => Mode::Title,
+            Mode::Title => Mode::Swatch,
             Mode::Swatch => {
                 if self.sticker_preferred {
                     Mode::Sticker
@@ -84,7 +89,7 @@ impl Window {
     fn size(&self) -> Vec2 {
         match self.mode {
             Mode::Editor => self.full_size,
-            Mode::Title => Vec2::new(360., 44.),
+            Mode::Title => Vec2::new(self.title_width, 44.),
             Mode::Swatch => self.swatch_size,
             Mode::Sticker => self.sticker_size,
         }
@@ -119,9 +124,14 @@ struct Gesture {
 impl App {
     pub fn new_sticker(&mut self) -> usize {
         let i = self.data.notes.len();
-        let mut n = Note::new("새 스티커 노트", None, i);
+        let mut n = Note::new("", None, i);
         n.body.clear();
-        n.color = PALETTE[i % PALETTE.len()];
+        n.color = self.desktop.default_color;
+        n.document.font_name = self.desktop.note_font.clone();
+        n.document.font_size = self.desktop.note_font_size * 4. / 3.;
+        n.document.opacity = self.desktop.opacity / 100.;
+        n.document.image_scale = [0.25, 0.5, 0.75, 1., 1.][self.desktop.image_scale];
+        n.document.image_fit = self.desktop.image_scale == 4;
         self.data.notes.push(n);
         self.studio.windows.insert(i, Window::new(Mode::Sticker));
         i
@@ -146,6 +156,11 @@ impl App {
                 continue;
             }
             w.reconcile(&self.data.notes[i]);
+            w.skip_title = self.desktop.skip_title;
+            let locked = self.data.notes[i].locked;
+            if locked {
+                w.mode = Mode::Swatch;
+            }
             let previous_active = self.active;
             let previous_occ = self.extra.edit_occurrence;
             let previous_custom = self.extra.custom_color;
@@ -157,21 +172,24 @@ impl App {
             self.extra.swatch_size = w.swatch_size;
             self.extra.swatch_drag = w.swatch_drag.take();
             let mode = w.mode;
-            let size = w.size();
+            let size = if locked { Vec2::splat(64.) } else { w.size() };
             let min = match mode {
                 Mode::Editor => Vec2::new(420., 420.),
-                Mode::Sticker => Vec2::new(260., 220.),
-                Mode::Title => size,
+                Mode::Sticker => Vec2::new(320., 220.),
+                Mode::Title => Vec2::new(180., 44.),
                 Mode::Swatch => Vec2::splat(24.),
             };
             let max = if mode == Mode::Title {
-                size
+                Vec2::new(1600., 44.)
             } else if mode == Mode::Swatch {
                 Vec2::splat(360.)
             } else {
                 Vec2::splat(4096.)
             };
-            let top = self.data.notes[i].topmost;
+            let min = if locked { size } else { min };
+            let max = if locked { size } else { max };
+            let top = self.data.notes[i].topmost
+                && !(mode == Mode::Swatch && self.desktop.unpin_minimized);
             let title = self.data.notes[i].title.clone();
             root.show_viewport_immediate(
                 viewport(i),
@@ -183,7 +201,8 @@ impl App {
                     })
                     .with_inner_size(size)
                     .with_min_inner_size(min)
-                    .with_resizable(mode != Mode::Title)
+                    .with_resizable(!locked)
+                    .with_transparent(true)
                     .with_decorations(false)
                     .with_window_level(if top {
                         egui::WindowLevel::AlwaysOnTop
@@ -192,13 +211,54 @@ impl App {
                     }),
                 |ctx, _| {
                     self.theme(ctx);
+                    if ctx.input_mut(|v| v.consume_key(egui::Modifiers::CTRL, egui::Key::T)) {
+                        self.data.notes[i].topmost = !self.data.notes[i].topmost;
+                    }
+                    if ctx.input_mut(|v| {
+                        v.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::H)
+                    }) {
+                        w.open = false;
+                        for other in self.studio.windows.values_mut() {
+                            other.open = false;
+                        }
+                    }
+                    if ctx.input_mut(|v| v.consume_key(egui::Modifiers::CTRL, egui::Key::P)) {
+                        self.desktop.project_popup = true;
+                        self.desktop.focus_dialog = true;
+                    }
+                    if ctx.input_mut(|v| v.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
+                        self.catalog.focus_find();
+                        self.catalog.tab = 1;
+                        self.page = 4;
+                        ctx.send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::Focus,
+                        );
+                    }
+                    if ctx.input_mut(|v| v.consume_key(egui::Modifiers::CTRL, egui::Key::H)) {
+                        self.catalog.replace_open = true;
+                        self.catalog.selected = Some(i);
+                        self.page = 4;
+                        ctx.send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::Focus,
+                        );
+                    }
+                    if ctx.input_mut(|v| v.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                        let now = ctx.input(|v| v.time);
+                        let old = self.desktop.last_escape.insert(ctx.viewport_id(), now);
+                        if old.is_some_and(|t| now - t < 0.8) {
+                            w.open = false;
+                        }
+                        w.help = false;
+                        self.extra.custom_color = false;
+                        self.extra.picker = None;
+                    }
                     if w.applied != Some(mode) {
                         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min));
                         ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(max));
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(
-                            mode != Mode::Title,
-                        ));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(!locked));
                         w.applied = Some(mode);
                     } else if let Some(r) = ctx.input(|v| v.viewport().inner_rect) {
                         if r.size().x >= min.x && r.size().y >= min.y {
@@ -206,7 +266,7 @@ impl App {
                                 Mode::Editor => w.full_size = r.size(),
                                 Mode::Sticker => w.sticker_size = r.size(),
                                 Mode::Swatch => self.extra.swatch_size = r.size(),
-                                _ => {}
+                                Mode::Title => w.title_width = r.width(),
                             }
                         }
                     }
@@ -225,9 +285,20 @@ impl App {
                         w.open = false;
                     }
                     let base = self.data.notes[i].color;
-                    let paper = mix(base, Color32::WHITE, 0.63);
+                    let paper = mix(
+                        base,
+                        Color32::WHITE,
+                        (1. - self.data.notes[i].document.opacity).clamp(0., 0.9),
+                    );
                     let header = mix(base, Color32::WHITE, 0.22);
                     let frame = egui::Frame::NONE
+                        .corner_radius(if mode == Mode::Sticker {
+                            18.
+                        } else if mode == Mode::Swatch {
+                            8.
+                        } else {
+                            6.
+                        })
                         .fill(if mode == Mode::Swatch {
                             base
                         } else if mode == Mode::Title {
@@ -246,145 +317,294 @@ impl App {
                         });
                     let mut drag_regions = vec![];
                     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                        ui.spacing_mut().item_spacing.x = 4.;
+                        if locked {
+                            let r = ui.allocate_rect(ui.max_rect(), Sense::click_and_drag());
+                            crate::icons::paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(r.rect.center(), Vec2::splat(28.)),
+                                Icon::Lock,
+                                INK,
+                            );
+                            if r.double_clicked() {
+                                self.ask_unlock(i, true);
+                            }
+                            if r.drag_started() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                            }
+                            r.on_hover_text("잠긴 메모 · 두 번 클릭해 열기")
+                                .context_menu(|ui| {
+                                    if ui.button("잠금 해제").clicked() {
+                                        self.ask_unlock(i, true);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("스티커 표시 해제").clicked() {
+                                        w.open = false;
+                                        ui.close_menu();
+                                    }
+                                });
+                            return;
+                        }
                         if mode == Mode::Swatch {
                             self.data.notes[i].fold = 2;
                             self.swatch_ui(ctx, ui, i);
                             if self.data.notes[i].fold == 0 {
-                                w.fold();
+                                w.mode = Mode::Sticker;
+                                w.sticker_preferred = true;
                             }
                             return;
                         }
+                        let focused = ctx.input(|v| v.viewport().focused.unwrap_or(false));
+                        let engaged = !self.desktop.auto_toolbar
+                            || focused
+                            || ui.rect_contains_pointer(ui.max_rect());
                         if mode == Mode::Sticker || mode == Mode::Title {
                             ui.visuals_mut().override_text_color = Some(INK);
                             ui.visuals_mut().widgets.inactive.bg_fill = paper;
                             ui.visuals_mut().extreme_bg_color = paper;
-                            ui.visuals_mut().selection.bg_fill = mix(base, Color32::WHITE, 0.05);
+                            ui.visuals_mut().selection.bg_fill = mix(base, Color32::WHITE, 0.25);
                         }
                         if mode == Mode::Title {
                             ui.horizontal(|ui| {
-                                if icon_button(ui, Icon::Fold, "작은 색상 상자로 접기").clicked()
+                                if engaged
+                                    && icon_button(ui, Icon::Fold, "색상 상자로 접기").clicked()
                                 {
                                     w.fold();
                                 }
-                                let width = (ui.available_width() - 36.).max(80.);
+                                let width = (ui.available_width() - if engaged { 32. } else { 0. })
+                                    .max(50.);
                                 let r = ui
                                     .add_sized(
                                         [width, 28.],
                                         egui::Label::new(
-                                            RichText::new(shorten(&self.data.notes[i].title, 22))
+                                            RichText::new(&self.data.notes[i].title)
                                                 .color(INK)
                                                 .size(14.),
                                         )
                                         .truncate()
                                         .sense(Sense::click_and_drag()),
                                     )
-                                    .on_hover_text("클릭: 스티커 노트 · 드래그: 이동");
+                                    .on_hover_text(
+                                        "제목 클릭: 스티커 펼치기 · 드래그: 이동 · 모서리: 폭 조절",
+                                    );
                                 if r.clicked() {
                                     w.sticker();
                                 }
                                 drag_regions.push(r.rect);
-                                if icon_button(ui, Icon::Edit, "전체 메모 편집").clicked() {
-                                    w.edit();
+                                if engaged {
+                                    pin_button(ui, &mut self.data.notes[i].topmost);
                                 }
                             });
                             return;
                         }
-                        ui.horizontal(|ui| {
-                            if icon_button(
-                                ui,
-                                Icon::Fold,
-                                if mode == Mode::Sticker {
-                                    "스티커 최소화"
-                                } else {
-                                    "메모 접기"
-                                },
-                            )
-                            .clicked()
-                            {
-                                w.fold();
-                                self.extra.picker = None;
-                            }
-                            if mode == Mode::Editor
-                                && ui
-                                    .add(
-                                        egui::Button::new("스티커 노트")
-                                            .small()
-                                            .selected(w.sticker_preferred),
-                                    )
-                                    .on_hover_text("제목과 본문만 보이는 스티커로 전환")
-                                    .clicked()
-                            {
-                                w.sticker();
-                            }
-                            let controls = if mode == Mode::Sticker { 4. } else { 2. };
-                            let width = (ui.available_width() - controls * 38.).max(20.);
-                            let r = ui.add_sized(
-                                [width, 28.],
-                                egui::Label::new(
-                                    RichText::new(if mode == Mode::Sticker {
-                                        "스티커 노트"
-                                    } else {
-                                        "메모 편집"
-                                    })
-                                    .size(12.)
-                                    .color(MUTED),
-                                )
-                                .sense(Sense::drag()),
-                            );
-                            drag_regions.push(r.rect);
-                            if mode == Mode::Sticker {
-                                if icon_button(ui, Icon::Plus, "새 스티커 노트 추가").clicked()
-                                {
+                        if mode == Mode::Sticker {
+                            ui.horizontal(|ui| {
+                                if icon_button(ui, Icon::Plus, "새 스티커 메모").clicked() {
                                     self.new_sticker();
                                 }
-                                if icon_button(ui, Icon::Edit, "일정과 상세 속성 편집").clicked()
-                                {
-                                    w.edit();
+                                let width = (ui.available_width()
+                                    - if engaged { 218. } else { 94. })
+                                .max(0.);
+                                let r = ui.allocate_response(Vec2::new(width, 28.), Sense::drag());
+                                drag_regions.push(r.rect);
+                                if engaged {
+                                    ui.menu_button("···", |ui| {
+                                        if ui.button("일정과 상세 속성 편집").clicked() {
+                                            w.edit();
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("도움말").clicked() {
+                                            w.help = true;
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("메모 잠금 설정").clicked() {
+                                            self.ask_lock(i);
+                                            ui.close_menu();
+                                        }
+                                        ui.checkbox(&mut self.data.notes[i].wiki, "위키에 보관");
+                                        ui.menu_button("프로젝트 설정  ›", |ui| {
+                                            ui.selectable_value(
+                                                &mut self.data.notes[i].project,
+                                                None,
+                                                "프로젝트 없음",
+                                            );
+                                            for (p, name) in self.data.projects.iter().enumerate() {
+                                                if !self.extra.hidden_projects.contains(&p)
+                                                    && !self.extra.deleted_projects.contains(&p)
+                                                {
+                                                    ui.selectable_value(
+                                                        &mut self.data.notes[i].project,
+                                                        Some(p),
+                                                        name,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                        if ui.button("동일 프로젝트 보기").clicked() {
+                                            self.project_filter = Some(
+                                                self.data.notes[i].project.unwrap_or(NO_PROJECT),
+                                            );
+                                            self.page = 0;
+                                            ctx.send_viewport_cmd_to(
+                                                egui::ViewportId::ROOT,
+                                                egui::ViewportCommand::Focus,
+                                            );
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("메모 복제본 생성").clicked() {
+                                            self.duplicate_note(i);
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("휴지통으로 이동").clicked() {
+                                            self.trash_note(i);
+                                            w.open = false;
+                                            ui.close_menu();
+                                        }
+                                        if ui
+                                            .button(RichText::new("영구삭제…").color(ACCENT))
+                                            .clicked()
+                                        {
+                                            self.request_purge(i);
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("메모창 설정").clicked() {
+                                            self.settings = true;
+                                            self.desktop.settings_tab = 2;
+                                            ctx.send_viewport_cmd_to(
+                                                egui::ViewportId::ROOT,
+                                                egui::ViewportCommand::Focus,
+                                            );
+                                            ui.close_menu();
+                                        }
+                                    });
+                                    if icon_button(ui, Icon::Alarm, "알람 날짜와 시간").clicked()
+                                    {
+                                        self.open_reminder(i);
+                                    }
+                                    let m = ui.menu_button("   ", |ui| {
+                                        crate::desktop::color_choices(
+                                            ui,
+                                            &mut self.data.notes[i].color,
+                                        )
+                                    });
+                                    crate::icons::paint_icon(
+                                        ui.painter(),
+                                        m.response.rect.shrink(5.),
+                                        Icon::Palette,
+                                        INK,
+                                    );
+                                    m.response.on_hover_text("메모 색상 변경");
                                 }
-                            }
-                            if icon_button(ui, Icon::Help, "이 창 사용 도움말").clicked() {
-                                w.help = !w.help;
-                            }
-                            if icon_button(ui, Icon::Close, "창 닫기 · 메모는 유지").clicked()
-                            {
-                                w.open = false;
-                            }
-                        });
-                        ui.add_space(10.);
-                        if mode == Mode::Sticker {
-                            let rows =
-                                ((ui.available_height() - 65.) / 22.).clamp(4., 40.) as usize;
+                                pin_button(ui, &mut self.data.notes[i].topmost);
+                                let mut done = self.data.notes[i].done_on(
+                                    self.extra.edit_occurrence.or(self.data.notes[i].date),
+                                );
+                                let changed = ui
+                                    .scope(|ui| {
+                                        ui.visuals_mut().widgets.inactive.bg_stroke =
+                                            egui::Stroke::new(1.0_f32, INK.gamma_multiply(0.45));
+                                        ui.checkbox(&mut done, "").on_hover_text("완료").changed()
+                                    })
+                                    .inner;
+                                if changed {
+                                    self.done_at(
+                                        i,
+                                        self.extra.edit_occurrence.or(self.data.notes[i].date),
+                                        done,
+                                    );
+                                    self.extra.scope_owner = ctx.viewport_id();
+                                }
+                                if icon_button(ui, Icon::Fold, "제목 한 줄로 접기").clicked()
+                                {
+                                    w.fold();
+                                }
+                                if engaged
+                                    && icon_button(ui, Icon::Close, "창 닫기 · 메모는 유지")
+                                        .clicked()
+                                {
+                                    w.open = false;
+                                }
+                            });
+                            ui.add_space(8.);
                             egui::ScrollArea::vertical()
                                 .id_salt(("sticker_content", i))
                                 .show(ui, |ui| {
+                                    let title_font = egui::FontId::new(
+                                        22.,
+                                        crate::desktop::family(
+                                            ui,
+                                            &self.data.notes[i].document.font_name,
+                                        ),
+                                    );
                                     ui.add(
                                         egui::TextEdit::multiline(&mut self.data.notes[i].title)
-                                            .font(egui::FontId::proportional(22.))
+                                            .font(title_font)
                                             .desired_width(f32::INFINITY)
                                             .desired_rows(1)
                                             .frame(false)
                                             .hint_text("제목"),
                                     );
-                                    ui.add_space(4.);
-                                    ui.separator();
-                                    ui.add_space(5.);
-                                    crate::refinements::body_input(
+                                    ui.add_space(6.);
+                                    let n = &mut self.data.notes[i];
+                                    n.document.toolbar_visible = engaged;
+                                    crate::composer::show(
                                         ui,
-                                        &mut self.data.notes[i].body,
-                                        rows,
-                                        "여기에 메모하세요…",
+                                        &mut n.body,
+                                        &mut n.document,
+                                        ("sticker_body", i),
                                     );
                                 });
+                            self.consume_body_project(i);
+                            if self.data.notes[i].document.active == 0
+                                && (!focused || self.data.notes[i].body.contains('\n'))
+                            {
+                                let n = &mut self.data.notes[i];
+                                crate::desktop::infer_title(&mut n.title, &mut n.body);
+                            }
                         } else {
+                            ui.horizontal(|ui| {
+                                if icon_button(ui, Icon::Fold, "메모 접기").clicked() {
+                                    w.fold();
+                                    self.extra.picker = None;
+                                }
+                                if ui.button("스티커 노트").clicked() {
+                                    w.sticker();
+                                }
+                                let width = (ui.available_width() - 72.).max(20.);
+                                let r = ui.add_sized(
+                                    [width, 28.],
+                                    egui::Label::new(
+                                        RichText::new("메모 편집").size(12.).color(MUTED),
+                                    )
+                                    .sense(Sense::drag()),
+                                );
+                                drag_regions.push(r.rect);
+                                ui.menu_button("···", |ui| {
+                                    if ui.button("도움말").clicked() {
+                                        w.help = true;
+                                        ui.close_menu();
+                                    }
+                                });
+                                if icon_button(ui, Icon::Close, "창 닫기 · 메모는 유지").clicked()
+                                {
+                                    w.open = false;
+                                }
+                            });
+                            ui.add_space(10.);
                             egui::ScrollArea::vertical()
                                 .id_salt(("editor_body", i))
                                 .show(ui, |ui| self.note_editor(ui));
                         }
                     });
-                    if mode != Mode::Swatch {
+                    if mode != Mode::Swatch && !locked {
                         window_gestures(ctx, &mut w, &drag_regions, min, max);
                     }
                     if w.mode != mode || !w.open {
+                        if w.mode == Mode::Swatch && self.desktop.unpin_minimized {
+                            self.data.notes[i].topmost = false;
+                        }
                         w.help = false;
                         self.extra.custom_color = false;
                         if self
@@ -463,6 +683,32 @@ impl App {
         self.sticky = self.studio.windows.values().any(|w| w.open);
     }
 }
+fn pin_button(ui: &mut egui::Ui, value: &mut bool) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.), Sense::click());
+    if *value || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            6.,
+            Color32::from_black_alpha(if *value { 20 } else { 8 }),
+        );
+    }
+    crate::icons::paint_icon(
+        ui.painter(),
+        rect.shrink(5.),
+        Icon::Pin,
+        if *value {
+            INK
+        } else {
+            INK.gamma_multiply(0.35)
+        },
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, *value, "항상 위에")
+    });
+    if response.on_hover_text("항상 위에 · Ctrl+T").clicked() {
+        *value = !*value;
+    }
+}
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(
         (a.r() as f32 * (1. - t) + b.r() as f32 * t) as u8,
@@ -492,7 +738,7 @@ fn window_gestures(ctx: &egui::Context, w: &mut Window, drag: &[Rect], min: Vec2
                 let r = pos.x > size.x - 9.;
                 let t = pos.y < 9.;
                 let b = pos.y > size.y - 9.;
-                let corner = if w.mode != Mode::Title && (l || r) && (t || b) {
+                let corner = if (l || r) && (t || b) {
                     Some((l, t))
                 } else {
                     None
@@ -524,17 +770,15 @@ fn window_gestures(ctx: &egui::Context, w: &mut Window, drag: &[Rect], min: Vec2
             _ => {}
         }
     }
-    if w.mode != Mode::Title {
-        if let Some(p) = ctx.input(|v| v.pointer.hover_pos()) {
-            let nw = Rect::from_min_size(local.min, Vec2::splat(10.));
-            let se = Rect::from_min_size(local.max - Vec2::splat(10.), Vec2::splat(10.));
-            let ne = Rect::from_min_size(egui::pos2(local.max.x - 10., 0.), Vec2::splat(10.));
-            let sw = Rect::from_min_size(egui::pos2(0., local.max.y - 10.), Vec2::splat(10.));
-            if nw.contains(p) || se.contains(p) {
-                ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
-            } else if ne.contains(p) || sw.contains(p) {
-                ctx.set_cursor_icon(egui::CursorIcon::ResizeNeSw);
-            }
+    if let Some(p) = ctx.input(|v| v.pointer.hover_pos()) {
+        let nw = Rect::from_min_size(local.min, Vec2::splat(10.));
+        let se = Rect::from_min_size(local.max - Vec2::splat(10.), Vec2::splat(10.));
+        let ne = Rect::from_min_size(egui::pos2(local.max.x - 10., 0.), Vec2::splat(10.));
+        let sw = Rect::from_min_size(egui::pos2(0., local.max.y - 10.), Vec2::splat(10.));
+        if nw.contains(p) || se.contains(p) {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+        } else if ne.contains(p) || sw.contains(p) {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeNeSw);
         }
     }
 }
@@ -616,6 +860,8 @@ mod tests {
         w.sticker();
         assert_eq!(w.mode, Mode::Sticker);
         w.fold();
+        assert_eq!(w.mode, Mode::Title);
+        w.fold();
         assert_eq!(w.mode, Mode::Swatch);
         w.fold();
         assert_eq!(w.mode, Mode::Sticker);
@@ -623,6 +869,7 @@ mod tests {
     #[test]
     fn explicit_editor_retains_sticker_restore_intent() {
         let mut w = Window::new(Mode::Sticker);
+        w.skip_title = true;
         w.edit();
         assert_eq!(w.mode, Mode::Editor);
         w.fold();

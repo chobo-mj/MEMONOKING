@@ -22,6 +22,9 @@ pub enum Icon {
     ChevronLeft,
     ChevronRight,
     Pin,
+    Alarm,
+    Palette,
+    Lock,
 }
 
 /// An icon-only control with a consistent hit area, keyboard focus and a spoken label.
@@ -85,6 +88,33 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
         );
     };
     match icon {
+        Icon::Alarm => {
+            painter.circle_stroke(p(12., 13.), 7. * scale, stroke);
+            line((12., 8.), (12., 13.));
+            line((12., 13.), (16., 15.));
+            line((4., 5.), (7., 3.));
+            line((17., 3.), (20., 5.));
+            line((7., 20.), (5., 22.));
+            line((17., 20.), (19., 22.));
+        }
+        Icon::Palette => {
+            painter.circle_stroke(p(12., 12.), 9. * scale, stroke);
+            for (x, y) in [(8., 7.), (15., 7.), (7., 13.), (16., 14.)] {
+                painter.circle_filled(p(x, y), 1.3 * scale, color);
+            }
+        }
+        Icon::Lock => {
+            box_outline((5., 10.), (19., 21.), 2.);
+            path(&[
+                (8., 10.),
+                (8., 6.),
+                (10., 3.),
+                (14., 3.),
+                (16., 6.),
+                (16., 10.),
+            ]);
+            line((12., 14.), (12., 17.));
+        }
         Icon::Close => {
             line((6.5, 6.5), (17.5, 17.5));
             line((17.5, 6.5), (6.5, 17.5));

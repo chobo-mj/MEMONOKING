@@ -51,6 +51,9 @@ pub struct Extra {
     pub wiki_selected: Option<usize>,
     pub tree_selected: Option<usize>,
     pub drafts: HashMap<(usize, usize, Option<NaiveDate>), String>,
+    pub draft_documents: HashMap<(usize, usize, Option<NaiveDate>), crate::composer::Document>,
+    pub comment_documents:
+        HashMap<(usize, usize, Option<NaiveDate>, usize), crate::composer::Document>,
     pub wiki_unfiled: bool,
     pub folder_open: HashSet<usize>,
     pub completion_scope: Option<(usize, NaiveDate, bool)>,
@@ -109,6 +112,8 @@ impl Default for Extra {
             wiki_selected: None,
             tree_selected: None,
             drafts: HashMap::new(),
+            draft_documents: HashMap::new(),
+            comment_documents: HashMap::new(),
             wiki_unfiled: false,
             folder_open: HashSet::from([0]),
             completion_scope: None,
@@ -167,7 +172,11 @@ impl App {
         };
         (self.search.is_empty()
             || n.title.to_lowercase().contains(&self.search.to_lowercase())
-            || n.body.to_lowercase().contains(&self.search.to_lowercase()))
+            || (!n.locked
+                && n.document
+                    .plain_text(&n.body)
+                    .to_lowercase()
+                    .contains(&self.search.to_lowercase())))
             && (!self.extra.search_created
                 || date_matches(
                     Some(n.created.date()),
@@ -179,8 +188,8 @@ impl App {
                     date_matches(Some(d), self.extra.scheduled_from, self.extra.scheduled_to)
                 }))
             && crate::refinements::project_match(self.extra.search_project, n.project)
-            && (!self.extra.image || n.has_image)
-            && (!self.extra.table || n.has_table)
+            && (!self.extra.image || (!n.locked && (n.has_image || n.document.has_images())))
+            && (!self.extra.table || (!n.locked && (n.has_table || n.document.has_tables())))
             && (!self.extra.link || n.has_link || n.body.contains("http"))
     }
     pub fn consume_project_header(&mut self, i: usize) {
@@ -478,6 +487,10 @@ impl App {
 }
 impl App {
     pub fn comments(&mut self, ui: &mut egui::Ui, i: usize, channel: usize) {
+        if self.data.notes[i].locked {
+            ui.label("잠긴 메모의 댓글은 표시하지 않습니다.");
+            return;
+        }
         let scope = if channel == 1 {
             self.extra.comment_occurrence
         } else {
@@ -494,32 +507,65 @@ impl App {
         } else {
             self.data.notes[i].journal_comments.clone()
         };
-        for c in list {
+        for (index, c) in list.into_iter().enumerate() {
             ui.group(|ui| {
-                ui.label(c);
+                if let Some(doc) = self
+                    .extra
+                    .comment_documents
+                    .get(&(channel, i, scope, index))
+                {
+                    let (timestamp, body) = c.split_once('\n').unwrap_or(("", &c));
+                    ui.label(RichText::new(timestamp).small().color(MUTED));
+                    crate::composer::view(
+                        ui,
+                        body,
+                        doc,
+                        ("comment_view", channel, i, scope, index),
+                    );
+                } else {
+                    ui.label(c);
+                }
             });
         }
-        let draft = self.extra.drafts.entry((channel, i, scope)).or_default();
-        crate::refinements::body_input(ui, draft, 3, "댓글을 입력하세요");
-        if ui.button("댓글 추가").clicked() && !draft.trim().is_empty() {
-            let c = format!(
-                "{}\n{}",
-                Local::now().format("%Y-%m-%d %H:%M"),
-                draft.trim()
-            );
-            if let Some(d) = scope {
-                self.data.notes[i]
-                    .occurrence_comments
-                    .entry(d)
-                    .or_default()
-                    .push(c)
+        let key = (channel, i, scope);
+        let mut draft = self.extra.drafts.remove(&key).unwrap_or_default();
+        let mut document = self.extra.draft_documents.remove(&key).unwrap_or_default();
+        document.toolbar_visible = true;
+        crate::composer::show(
+            ui,
+            &mut draft,
+            &mut document,
+            ("comment_draft", channel, i, scope),
+        );
+        if ui.button("댓글 추가").clicked()
+            && (!draft.trim().is_empty()
+                || document.has_tables()
+                || document.has_images()
+                || document.tabs.len() > 1)
+        {
+            let c = format!("{}\n{}", Local::now().format("%Y-%m-%d %H:%M"), draft);
+            let index = if let Some(d) = scope {
+                let comments = self.data.notes[i].occurrence_comments.entry(d).or_default();
+                let index = comments.len();
+                comments.push(c);
+                index
             } else if channel == 0 {
-                self.data.notes[i].wiki_comments.push(c)
+                let index = self.data.notes[i].wiki_comments.len();
+                self.data.notes[i].wiki_comments.push(c);
+                index
             } else {
-                self.data.notes[i].journal_comments.push(c)
-            }
+                let index = self.data.notes[i].journal_comments.len();
+                self.data.notes[i].journal_comments.push(c);
+                index
+            };
+            self.extra
+                .comment_documents
+                .insert((channel, i, scope, index), document);
+            document = Default::default();
             draft.clear();
         }
+        self.extra.drafts.insert(key, draft);
+        self.extra.draft_documents.insert(key, document);
     }
     pub fn relation_tree(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |cols| {
@@ -548,7 +594,11 @@ impl App {
             }
             if let Some(i) = self.extra.tree_selected.filter(|&i| self.visible(i)) {
                 cols[1].heading(&self.data.notes[i].title);
-                cols[1].label(&self.data.notes[i].body);
+                cols[1].label(if self.data.notes[i].locked {
+                    "잠긴 메모"
+                } else {
+                    &self.data.notes[i].body
+                });
                 if cols[1].button("편집창 열기").clicked() {
                     self.open_note(i);
                 }
@@ -831,6 +881,7 @@ impl App {
                 "표 모아보기",
                 "이미지 모아보기",
                 "링크 · 즐겨찾기",
+                "휴지통",
             ]
             .iter()
             .enumerate()
@@ -841,9 +892,10 @@ impl App {
         ui.separator();
         match self.extra.utilities_tab {
             0 => self.journal(ui),
-            1 => self.real_table_gallery(ui),
-            2 => self.real_image_gallery(ui),
-            _ => self.real_bookmark_gallery(ui),
+            1 => self.content_tables(ui),
+            2 => self.content_images(ui),
+            3 => self.real_bookmark_gallery(ui),
+            _ => self.trash_ui(ui),
         }
     }
 }
