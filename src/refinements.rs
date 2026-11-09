@@ -107,9 +107,18 @@ impl App {
         }
     }
     pub fn set_completion_time(&mut self, t: NaiveDateTime) {
+        if self.editor_completion().is_none() {
+            return;
+        }
         let i = self.active;
-        if let Some(d) = self.extra.edit_occurrence {
-            self.data.notes[i].occurrence_completed.insert(d, t);
+        if self.data.notes[i].duration > 1 {
+            if let Some(completed) = self
+                .extra
+                .edit_occurrence
+                .and_then(|d| self.data.notes[i].occurrence_completed.get_mut(&d))
+            {
+                *completed = t;
+            }
             self.data.notes[i].refresh_done();
         } else {
             self.data.notes[i].completed = Some(t);
@@ -119,6 +128,9 @@ impl App {
     pub fn open_note_on(&mut self, i: usize, d: Option<NaiveDate>) {
         self.open_note(i);
         self.extra.edit_occurrence = d.filter(|_| self.data.notes[i].duration > 1);
+        if let Some(w) = self.studio.windows.get_mut(&i) {
+            w.occurrence = self.extra.edit_occurrence;
+        }
         if let Some(d) = self.extra.edit_occurrence {
             self.completion_edit = self.data.notes[i]
                 .occurrence_completed
@@ -731,8 +743,10 @@ impl App {
             self.extra
                 .edit_occurrence
                 .and_then(|d| n.occurrence_completed.get(&d).copied())
-        } else {
+        } else if n.done {
             n.completed
+        } else {
+            None
         }
     }
 }
@@ -753,5 +767,35 @@ mod completion_editor_tests {
         assert_eq!(a.editor_completion(), Some(t0));
         a.open_note_on(0, Some(d + chrono::Duration::days(2)));
         assert!(a.editor_completion().is_none());
+    }
+    #[test]
+    fn stale_time_correction_cannot_complete_an_unchecked_note_or_day() {
+        let d = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let t = d.and_hms_opt(9, 0, 0).unwrap();
+        let corrected = d.and_hms_opt(10, 0, 0).unwrap();
+        let mut a = App::sample(d);
+        a.data.notes[0].done = true;
+        a.data.notes[0].completed = Some(t);
+        a.open_note_on(0, None);
+        a.data.complete(0, false, Local::now());
+        a.set_completion_time(corrected);
+        assert!(!a.data.notes[0].done);
+        assert!(a.data.notes[0].completed.is_none());
+
+        a.data.notes[0].date = Some(d);
+        a.data.notes[0].duration = 3;
+        a.complete_span(0, d, true, false, t);
+        a.open_note_on(0, Some(d));
+        a.complete_span(0, d, false, false, t);
+        a.set_completion_time(corrected);
+        assert!(!a.data.notes[0].done_on(Some(d)));
+        assert!(!a.data.notes[0].occurrence_completed.contains_key(&d));
+
+        a.complete_span(0, d, true, false, t);
+        a.set_completion_time(corrected);
+        assert_eq!(
+            a.data.notes[0].occurrence_completed.get(&d),
+            Some(&corrected)
+        );
     }
 }

@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod dragging;
 mod extras;
+mod icons;
 mod media;
 mod model;
 mod refinements;
+mod studio;
 mod views;
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Color32, RichText, Vec2};
@@ -34,6 +36,7 @@ const COLORS: [Color32; 3] = [
 #[derive(Clone)]
 struct NoteDrag;
 struct App {
+    studio: studio::Studio,
     extra: extras::Extra,
     sources: Vec<dragging::Source>,
     targets: Vec<dragging::Target>,
@@ -69,7 +72,7 @@ struct App {
     edit_error: String,
     hotkeys: Option<GlobalHotKeyManager>,
     registered: Vec<HotKey>,
-    shortcuts: [String; 2],
+    shortcuts: [String; 3],
     hotkey_status: String,
 }
 impl App {
@@ -94,6 +97,7 @@ impl App {
     fn sample(today: NaiveDate) -> Self {
         Self {
             extra: extras::Extra::default(),
+            studio: studio::Studio::default(),
             sources: vec![],
             targets: vec![],
             drag: None,
@@ -128,7 +132,11 @@ impl App {
             edit_error: String::new(),
             hotkeys: None,
             registered: vec![],
-            shortcuts: ["Ctrl+Alt+N".into(), "Ctrl+Alt+C".into()],
+            shortcuts: [
+                "Ctrl+Alt+N".into(),
+                "Ctrl+Alt+C".into(),
+                "Ctrl+Alt+S".into(),
+            ],
             hotkey_status: String::new(),
         }
     }
@@ -155,6 +163,20 @@ impl App {
         };
         v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
         v.widgets.active.weak_bg_fill = v.selection.bg_fill;
+        v.window_fill = v.panel_fill;
+        v.widgets.inactive.weak_bg_fill = if self.dark {
+            Color32::from_rgb(42, 43, 41)
+        } else {
+            Color32::from_rgb(244, 244, 240)
+        };
+        v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        v.widgets.hovered.weak_bg_fill = if self.dark {
+            Color32::from_rgb(55, 55, 51)
+        } else {
+            Color32::from_rgb(235, 236, 230)
+        };
+        v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+        v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
         ctx.set_visuals(v);
         ctx.style_mut(|s| {
             s.spacing.item_spacing = Vec2::new(8., 8.);
@@ -179,8 +201,14 @@ impl App {
             self.hotkey_status = "Ctrl+Alt+N 형식으로 입력하세요".into();
             return;
         };
-        if new[0].id() == new[1].id() {
-            self.hotkey_status = "두 동작에 서로 다른 단축키를 지정하세요".into();
+        if new
+            .iter()
+            .map(|h| h.id())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != new.len()
+        {
+            self.hotkey_status = "각 동작에 서로 다른 단축키를 지정하세요".into();
             return;
         }
         let Some(m) = &self.hotkeys else {
@@ -223,6 +251,20 @@ impl App {
         }
         self.hotkey_status = "전역 단축키 사용 중 · 앱 실행 중에 동작".into();
     }
+    fn shortcut_label(&self, action: usize) -> String {
+        self.registered
+            .get(action)
+            .map(|h| {
+                h.to_string()
+                    .replace("control+", "Ctrl+")
+                    .replace("alt+", "Alt+")
+                    .replace("shift+", "Shift+")
+                    .replace("super+", "Win+")
+                    .replace("Key", "")
+                    .replace("Digit", "")
+            })
+            .unwrap_or_else(|| "사용 안 함".into())
+    }
     fn open_note(&mut self, i: usize) {
         self.active = i;
         self.extra.edit_occurrence = self.data.notes[i]
@@ -232,6 +274,10 @@ impl App {
             .copied();
         self.editor = true;
         self.sticky = true;
+        self.studio.open(i, self.extra.edit_occurrence);
+        if let Some(w) = self.studio.windows.get_mut(&i) {
+            w.schedule_start = self.data.notes[i].date;
+        }
         self.data.notes[i].fold = 0;
         self.edit_error.clear();
         let n = &self.data.notes[i];
@@ -271,6 +317,8 @@ impl eframe::App for App {
                     self.capture = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                } else if self.registered.get(2).is_some_and(|h| h.id() == e.id) {
+                    self.new_sticker();
                 } else if self.registered.get(1).is_some_and(|h| h.id() == e.id) {
                     self.floating = true;
                     ctx.send_viewport_cmd_to(
@@ -356,14 +404,21 @@ impl eframe::App for App {
                             .iter()
                             .enumerate()
                             {
-                                if ui
-                                    .add_sized(
-                                        [188., 34.],
-                                        egui::Button::new(*name)
-                                            .selected(self.page == i)
-                                            .frame(self.page == i),
-                                    )
-                                    .clicked()
+                                if studio::nav_button(
+                                    ui,
+                                    name,
+                                    self.page == i,
+                                    [
+                                        icons::Icon::Sticky,
+                                        icons::Icon::Folder,
+                                        icons::Icon::Calendar,
+                                        icons::Icon::ChevronRight,
+                                        icons::Icon::Folder,
+                                        icons::Icon::Calendar,
+                                        icons::Icon::Settings,
+                                    ][i],
+                                )
+                                .clicked()
                                 {
                                     self.page = i;
                                 }
@@ -435,6 +490,17 @@ impl eframe::App for App {
                 }
                 ui.label(RichText::new("개인 작업 공간").small().color(MUTED));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::icon_button(ui, icons::Icon::Help, "작업 공간 도움말").clicked()
+                    {
+                        self.studio.help = !self.studio.help;
+                    }
+                    if ui
+                        .button("스티커 노트")
+                        .on_hover_text(format!("새 스티커 · {}", self.shortcut_label(2)))
+                        .clicked()
+                    {
+                        self.new_sticker();
+                    }
                     if ui.button("캘린더 분리 ↗").clicked() {
                         self.floating = true;
                     }
@@ -520,6 +586,26 @@ impl eframe::App for App {
             .default_width(520.)
             .show(ctx, |ui| self.settings_ui(ui));
         self.settings = open;
+        if self.studio.help {
+            let mut open = true;
+            egui::Window::new("작업 공간 도움말")
+                .open(&mut open)
+                .default_width(380.)
+                .show(ctx, |ui| {
+                    ui.heading("내 메모, 내 방식으로");
+                    ui.label("메모 제목을 눌러 독립 편집창을 여세요.");
+                    ui.label("스티커 노트는 제목과 본문만 간결하게 보여줍니다.");
+                    ui.label("메모 제목을 달력 날짜에 끌면 일정이 지정됩니다.");
+                    ui.label("수집함에서 관계를 연결하고 위키에서 지식을 분류하세요.");
+                    ui.separator();
+                    for (i, name) in ["빠른 메모", "분리 캘린더", "새 스티커"].iter().enumerate()
+                    {
+                        ui.label(format!("{name} · {}", self.shortcut_label(i)));
+                    }
+                    ui.label("단축키는 설정에서 바꿀 수 있습니다.");
+                });
+            self.studio.help = open;
+        }
         if self.floating {
             let mut open = true;
             ctx.show_viewport_immediate(

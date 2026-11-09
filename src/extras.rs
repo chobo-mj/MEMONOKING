@@ -80,7 +80,6 @@ pub struct Extra {
     pub media_to: Option<NaiveDate>,
     pub table_search: String,
     pub bookmarks: Vec<(String, String)>,
-    pub note_size: Vec2,
     pub size_applied: Option<(usize, u8)>,
     pub custom_color: bool,
 }
@@ -139,7 +138,6 @@ impl Default for Extra {
             media_to: None,
             table_search: String::new(),
             bookmarks: vec![("프로젝트 참고 자료".into(), "https://example.com".into())],
-            note_size: Vec2::new(600., 640.),
             size_applied: None,
             custom_color: false,
         }
@@ -240,191 +238,92 @@ impl App {
     }
     pub fn note_options(&mut self, ui: &mut egui::Ui, i: usize) {
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.data.notes[i].topmost, "항상 위에");
-            ui.menu_button("접었을 때 색상", |ui| {
+            let color = self.data.notes[i].color;
+            let menu = ui.menu_button("     ", |ui| {
+                ui.label(RichText::new("메모 색상").small().color(MUTED));
                 ui.horizontal_wrapped(|ui| {
                     for color in PALETTE {
-                        if ui
-                            .add_sized([26., 26.], egui::Button::new("").fill(color))
-                            .clicked()
-                        {
+                        let r = ui.add_sized([26., 26.], egui::Button::new("").fill(color));
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!(
+                                    "색상 #{:02X}{:02X}{:02X}",
+                                    color.r(),
+                                    color.g(),
+                                    color.b()
+                                ),
+                            )
+                        });
+                        if r.clicked() {
                             self.data.notes[i].color = color;
                             ui.close_menu();
                         }
                     }
                 });
+                ui.separator();
                 if ui.button("사용자 지정 색상…").clicked() {
                     self.extra.custom_color = true;
+                    ui.close_menu();
                 }
             });
-            if self.extra.custom_color {
-                ui.color_edit_button_srgba(&mut self.data.notes[i].color);
-            }
+            ui.painter()
+                .rect_filled(menu.response.rect.shrink(4.), 4., color);
+            menu.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "메모 색상 선택")
+            });
+            menu.response.on_hover_text("메모 색상");
+            ui.checkbox(&mut self.data.notes[i].topmost, "항상 위에");
             ui.label(
                 RichText::new(format!(
-                    "생성 {}",
-                    self.data.notes[i].created.format("%Y-%m-%d %H:%M")
+                    "{} 생성",
+                    self.data.notes[i].created.format("%Y.%m.%d %H:%M")
                 ))
-                .small()
+                .size(11.)
                 .color(MUTED),
             );
         });
     }
     pub fn detached_note(&mut self, ctx: &egui::Context) {
-        if !self.editor && !self.sticky {
-            return;
-        }
-        let i = self.active;
-        if self.data.notes[i].deleted {
-            self.editor = false;
-            self.sticky = false;
-            return;
-        }
-        let fold = self.data.notes[i].fold;
-        let size = match fold {
-            1 => Vec2::new(380., 42.),
-            2 => self.extra.swatch_size,
-            _ => self.extra.note_size,
-        };
-        let min_size = match fold {
-            0 => Vec2::new(360., 320.),
-            1 => size,
-            _ => Vec2::new(24., 24.),
-        };
-        let max_size = match fold {
-            0 => Vec2::new(4096., 4096.),
-            1 => size,
-            _ => Vec2::new(360., 360.),
-        };
-        let id = egui::ViewportId::from_hash_of("note_editor");
-        let mut open = true;
-        let title = shorten(&self.data.notes[i].title, 32);
-        let top = self.data.notes[i].topmost;
-        ctx.show_viewport_immediate(
-            id,
-            egui::ViewportBuilder::default()
-                .with_title(title)
-                .with_decorations(fold == 0)
-                .with_inner_size(size)
-                .with_min_inner_size(min_size)
-                .with_resizable(fold != 1)
-                .with_window_level(if top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }),
-            |ctx, _| {
-                self.theme(ctx);
-                if fold == 0 {
-                    if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
-                        if r.width() > 350. && r.height() > 300. {
-                            self.extra.note_size = r.size();
-                        }
-                    }
-                }
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }));
-                if self.extra.size_applied != Some((i, fold)) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(fold == 0));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(max_size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(fold != 1));
-                    self.extra.size_applied = Some((i, fold));
-                }
-                if fold == 2 && self.extra.size_applied == Some((i, 2)) {
-                    if let Some(r) = ctx.input(|i| i.viewport().inner_rect) {
-                        if r.width() >= 24.
-                            && r.width() <= 360.
-                            && r.height() >= 24.
-                            && r.height() <= 360.
-                        {
-                            self.extra.swatch_size = r.size();
-                        }
-                    }
-                }
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    open = false;
-                }
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::NONE
-                            .fill(if fold > 0 {
-                                self.data.notes[i].color
-                            } else {
-                                ctx.style().visuals.panel_fill
-                            })
-                            .inner_margin(if fold == 2 { 0. } else { 6. }),
-                    )
-                    .show(ctx, |ui| {
-                        if fold == 2 {
-                            self.swatch_ui(ctx, ui, i);
-                        } else {
-                            ui.horizontal(|ui| {
-                                if ui.button("접기").clicked() {
-                                    self.data.notes[i].fold = (fold + 1) % 3;
-                                    self.extra.picker = None;
-                                }
-                                if fold == 1 {
-                                    let r = ui.add(
-                                        egui::Label::new(
-                                            RichText::new(shorten(&self.data.notes[i].title, 12))
-                                                .color(INK),
-                                        )
-                                        .sense(egui::Sense::drag()),
-                                    );
-                                    if r.drag_started() {
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                                    }
-                                    if ui.small_button("펼치기").clicked() {
-                                        self.data.notes[i].fold = 0;
-                                    }
-                                    if ui.small_button("×").clicked() {
-                                        open = false;
-                                    }
-                                }
-                            });
-                            if fold == 0 {
-                                egui::ScrollArea::vertical().show(ui, |ui| self.note_editor(ui));
-                            }
-                        }
-                    });
-                self.picker_window(ctx);
-                self.scope_dialog(ctx);
-            },
-        );
-        if !open {
-            self.editor = false;
-            self.sticky = false;
-            self.extra.size_applied = None;
-        }
+        self.render_note_windows(ctx);
     }
     pub fn date_controls(&mut self, ui: &mut egui::Ui, i: usize) {
+        ui.label(RichText::new("일정").small().color(MUTED));
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .button(format!(
-                    "날짜·시간 선택  {} {}",
-                    self.date_edit, self.time_edit
-                ))
-                .clicked()
-            {
-                self.extra.picker = Some(Picker::new(
-                    0,
-                    self.data.notes[i].date.unwrap_or(Local::now().date_naive()),
-                    self.data.notes[i].time,
-                ));
+            let n = &self.data.notes[i];
+            let day = n.date.unwrap_or(Local::now().date_naive());
+            let text = n
+                .date
+                .map(|d| format!("{}  {}", d.format("%Y.%m.%d"), n.time.format("%H:%M")))
+                .unwrap_or("날짜와 시간 선택".into());
+            if ui.button(text).clicked() {
+                self.extra.picker = Some(Picker::new(0, day, self.data.notes[i].time));
             }
-            if self.data.notes[i].completed.is_some() && ui.button("완료 시각 달력").clicked()
-            {
-                let t = self.data.notes[i]
-                    .completed
-                    .unwrap_or(Local::now().naive_local());
-                self.extra.picker = Some(Picker::new(8, t.date(), t.time()));
+            let n = &mut self.data.notes[i];
+            let old = n.duration;
+            egui::ComboBox::from_id_salt("duration_days")
+                .selected_text(format!("{}일", n.duration))
+                .show_ui(ui, |ui| {
+                    for d in 1..=5 {
+                        ui.selectable_value(&mut n.duration, d, format!("{d}일"));
+                    }
+                });
+            if old != n.duration {
+                n.refresh_done();
             }
+            ui.checkbox(&mut n.recurring, "정기 일정")
+                .on_hover_text("반복 표시 · 실제 반복 계산은 아직 연결 전입니다");
         });
+        if let Some(t) = self.editor_completion() {
+            ui.add_space(4.);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("완료 시간 :");
+                if ui.button(t.format("%Y.%m.%d  %H:%M").to_string()).clicked() {
+                    self.extra.picker = Some(Picker::new(8, t.date(), t.time()));
+                }
+            });
+        }
     }
     pub fn picker_window(&mut self, ctx: &egui::Context) {
         let Some(mut p) = self.extra.picker.take() else {
@@ -432,6 +331,9 @@ impl App {
         };
         if p.owner != ctx.viewport_id() {
             self.extra.picker = Some(p);
+            return;
+        }
+        if p.target == 8 && self.editor_completion().is_none() {
             return;
         }
         let mut open = true;

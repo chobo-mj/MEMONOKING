@@ -1,5 +1,5 @@
 use crate::*;
-use chrono::{Duration, NaiveDateTime, NaiveTime};
+use chrono::Duration;
 use egui::{Rect, Sense, Stroke};
 impl App {
     pub fn filters(&mut self, ui: &mut egui::Ui) {
@@ -415,7 +415,16 @@ impl App {
     }
     pub fn note_editor(&mut self, ui: &mut egui::Ui) {
         let i = self.active;
-        ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut self.data.notes[i].title)
+                .font(egui::FontId::proportional(28.))
+                .desired_rows(1)
+                .desired_width(f32::INFINITY)
+                .frame(false)
+                .hint_text("메모 제목"),
+        );
+        ui.add_space(8.);
+        ui.horizontal_wrapped(|ui| {
             let n = &self.data.notes[i];
             let today = Local::now().date_naive();
             let occurrence = self.extra.edit_occurrence.or_else(|| {
@@ -425,92 +434,36 @@ impl App {
                     n.date
                 }
             });
-            let mut d = n.done_on(occurrence);
-            if ui.checkbox(&mut d, "완료").changed() {
-                self.done_at(i, occurrence, d);
+            let mut done = n.done_on(occurrence);
+            if ui.checkbox(&mut done, "완료").changed() {
+                self.done_at(i, occurrence, done);
                 self.extra.scope_owner = ui.ctx().viewport_id();
-                self.completion_edit = self.data.notes[i]
-                    .completed
-                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
+            }
+            ui.checkbox(&mut self.data.notes[i].starred, "중요");
+            ui.checkbox(&mut self.data.notes[i].wiki, "위키");
+            if self.data.notes[i].duration > 1 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} / {}일 완료",
+                        self.data.notes[i].occurrence_completed.len(),
+                        self.data.notes[i].duration
+                    ))
+                    .small()
+                    .color(MUTED),
+                );
             }
         });
-        if self.data.notes[i].duration > 1 {
-            ui.label(format!(
-                "기간 {}일 · {}일 완료",
-                self.data.notes[i].duration,
-                self.data.notes[i].occurrence_completed.len()
-            ));
-        }
+        ui.add_space(8.);
         self.note_options(ui, i);
-        self.date_controls(ui, i);
-        let can_edit_completion = self.editor_completion().is_some();
-        let mut correction = None;
-        let n = &mut self.data.notes[i];
-        ui.add(
-            egui::TextEdit::multiline(&mut n.title)
-                .font(egui::FontId::proportional(26.))
-                .desired_rows(1)
-                .desired_width(f32::INFINITY)
-                .frame(false),
-        );
+        ui.add_space(8.);
         ui.separator();
+        ui.add_space(8.);
+        self.date_controls(ui, i);
+        ui.add_space(12.);
+        ui.label(RichText::new("분류").small().color(MUTED));
+        let n = &mut self.data.notes[i];
         ui.horizontal_wrapped(|ui| {
-            ui.label("날짜");
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.date_edit)
-                        .hint_text("YYYY-MM-DD")
-                        .desired_width(115.),
-                )
-                .clicked()
-            {
-                self.extra.picker = Some(crate::extras::Picker::new(
-                    0,
-                    n.date.unwrap_or(Local::now().date_naive()),
-                    n.time,
-                ));
-            }
-            ui.label("시간");
-            if ui
-                .add(egui::TextEdit::singleline(&mut self.time_edit).desired_width(65.))
-                .clicked()
-            {
-                self.extra.picker = Some(crate::extras::Picker::new(
-                    0,
-                    n.date.unwrap_or(Local::now().date_naive()),
-                    n.time,
-                ));
-            }
-            if ui.button("일정 적용").clicked() {
-                let date = if self.date_edit.trim().is_empty() {
-                    Ok(None)
-                } else {
-                    NaiveDate::parse_from_str(&self.date_edit, "%Y-%m-%d").map(Some)
-                };
-                match (date, NaiveTime::parse_from_str(&self.time_edit, "%H:%M")) {
-                    (Ok(d), Ok(t)) => {
-                        if let Some(d) = d {
-                            n.move_start(d);
-                        } else {
-                            n.date = None;
-                        }
-                        n.time = t;
-                        self.edit_error.clear();
-                    }
-                    _ => self.edit_error = "날짜 YYYY-MM-DD, 시간 HH:MM을 확인하세요".into(),
-                }
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt(ui.id().with("label"))
-                .selected_text(LABELS[n.label])
-                .show_ui(ui, |ui| {
-                    for (i, t) in LABELS.iter().enumerate() {
-                        ui.selectable_value(&mut n.label, i, *t);
-                    }
-                });
-            egui::ComboBox::from_id_salt(ui.id().with("project"))
+            egui::ComboBox::from_id_salt("memo_project")
                 .selected_text(
                     n.project
                         .map(|p| self.data.projects[p].as_str())
@@ -518,37 +471,27 @@ impl App {
                 )
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut n.project, None, "프로젝트 없음");
-                    for (i, p) in self.data.projects.iter().enumerate() {
-                        if self.extra.hidden_projects.contains(&i)
-                            || self.extra.deleted_projects.contains(&i)
+                    for (p, name) in self.data.projects.iter().enumerate() {
+                        if !self.extra.hidden_projects.contains(&p)
+                            && !self.extra.deleted_projects.contains(&p)
                         {
-                            continue;
+                            ui.selectable_value(&mut n.project, Some(p), name);
                         }
-                        ui.selectable_value(&mut n.project, Some(i), p);
                     }
                 });
-            ui.checkbox(&mut n.recurring, "정기 일정 표시");
-            let old = n.duration;
-            egui::ComboBox::from_id_salt("duration_days")
-                .selected_text(format!("{}일", n.duration))
+            egui::ComboBox::from_id_salt("memo_label")
+                .selected_text(LABELS[n.label])
                 .show_ui(ui, |ui| {
-                    for days in 1..=5 {
-                        ui.selectable_value(&mut n.duration, days, format!("{days}일"));
+                    for (i, name) in LABELS.iter().enumerate() {
+                        ui.selectable_value(&mut n.label, i, *name);
                     }
                 });
-            if old != n.duration {
-                n.refresh_done();
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut n.starred, "중요");
-            ui.checkbox(&mut n.wiki, "위키");
             if n.wiki {
                 egui::ComboBox::from_id_salt("wiki_folder_assignment")
                     .selected_text(
                         n.folder
                             .map(|f| self.extra.folders[f].title.as_str())
-                            .unwrap_or("미분류"),
+                            .unwrap_or("위키 미분류"),
                     )
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut n.folder, None, "미분류");
@@ -558,39 +501,12 @@ impl App {
                     });
             }
         });
-        ui.label(
-            RichText::new("정기 일정 표시는 필터 시연용이며 반복 계산은 후속 단계입니다.")
-                .small()
-                .color(MUTED),
-        );
-        ui.add_space(12.);
-        crate::refinements::body_input(ui, &mut n.body, 9, "메모 내용을 입력하세요");
-        if can_edit_completion {
-            ui.separator();
-            ui.label("완료 시각 · 실제 완료한 시각으로 수정 가능");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.completion_edit).desired_width(180.));
-                if ui.button("완료 시각 적용").clicked() {
-                    match NaiveDateTime::parse_from_str(&self.completion_edit, "%Y-%m-%d %H:%M") {
-                        Ok(t) => {
-                            correction = Some(t);
-                            self.edit_error.clear();
-                        }
-                        Err(_) => self.edit_error = "YYYY-MM-DD HH:MM 형식을 입력하세요".into(),
-                    }
-                }
-            });
-        }
-        if !self.edit_error.is_empty() {
-            ui.colored_label(ACCENT, &self.edit_error);
-        }
+        ui.add_space(14.);
         ui.separator();
-        if let Some(t) = correction {
-            self.set_completion_time(t);
-        }
+        ui.add_space(12.);
+        crate::refinements::body_input(ui, &mut n.body, 10, "생각이나 할 일을 적어보세요…");
         self.consume_project_header(i);
-        ui.strong("연결된 메모 / 하위 메모");
-        let ids: Vec<_> = self
+        let related: Vec<_> = self
             .data
             .notes
             .iter()
@@ -601,10 +517,18 @@ impl App {
             })
             .map(|(j, _)| j)
             .collect();
-        for j in ids {
-            if ui.link(&self.data.notes[j].title).clicked() {
-                self.open_note(j);
-            }
+        if !related.is_empty() {
+            ui.add_space(8.);
+            egui::CollapsingHeader::new(format!("연결된 메모 {}개", related.len())).show(
+                ui,
+                |ui| {
+                    for j in related {
+                        if ui.link(&self.data.notes[j].title).clicked() {
+                            self.open_note(j);
+                        }
+                    }
+                },
+            );
         }
     }
     pub fn journal(&mut self, ui: &mut egui::Ui) {
@@ -616,12 +540,28 @@ impl App {
         ui.separator();
         ui.strong("전역 단축키");
         ui.label("다른 Windows 프로그램 사용 중에도 동작합니다. 앱은 실행 중이어야 합니다.");
-        for (i, name) in ["빠른 메모", "분리 캘린더"].iter().enumerate() {
+        ui.add_space(6.);
+        for (i, name) in ["빠른 메모", "분리 캘린더", "스티커 노트 추가"]
+            .iter()
+            .enumerate()
+        {
             ui.horizontal(|ui| {
-                ui.label(*name);
-                ui.text_edit_singleline(&mut self.shortcuts[i]);
+                ui.add_sized([140., 34.], egui::Label::new(*name));
+                let fill = if self.dark {
+                    Color32::from_rgb(42, 43, 41)
+                } else {
+                    Color32::from_rgb(244, 244, 240)
+                };
+                ui.add_sized(
+                    [260., 34.],
+                    egui::TextEdit::singleline(&mut self.shortcuts[i])
+                        .desired_width(240.)
+                        .background_color(fill)
+                        .margin(Vec2::new(10., 7.)),
+                );
             });
         }
+        ui.add_space(6.);
         if ui.button("단축키 적용").clicked() {
             self.apply_shortcuts();
         }
