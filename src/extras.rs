@@ -10,6 +10,7 @@ pub struct Folder {
 pub struct Picker {
     pub owner: egui::ViewportId,
     pub target: usize,
+    pub bound_note: Option<(usize, Option<NaiveDate>)>,
     pub date: NaiveDate,
     pub month: NaiveDate,
     pub hour: u32,
@@ -18,12 +19,13 @@ pub struct Picker {
 impl Picker {
     pub fn new(target: usize, date: NaiveDate, time: chrono::NaiveTime) -> Self {
         Self {
-            owner: if target == 0 || target == 8 {
+            owner: if target == 0 || target == 8 || target == 9 {
                 egui::ViewportId::from_hash_of("note_editor")
             } else {
                 egui::ViewportId::ROOT
             },
             target,
+            bound_note: None,
             date,
             month: date.with_day(1).unwrap(),
             hour: time.hour(),
@@ -60,8 +62,6 @@ pub struct Extra {
     pub comment_occurrence: Option<NaiveDate>,
     pub edit_occurrence: Option<NaiveDate>,
     pub missing_image: Option<usize>,
-    pub swatch_size: Vec2,
-    pub swatch_drag: Option<crate::refinements::SwatchDrag>,
     pub journal_open: HashMap<(usize, Option<NaiveDate>), bool>,
     pub scope_owner: egui::ViewportId,
     pub journal_all: bool,
@@ -84,7 +84,6 @@ pub struct Extra {
     pub table_search: String,
     pub bookmarks: Vec<(String, String)>,
     pub size_applied: Option<(usize, u8)>,
-    pub custom_color: bool,
 }
 impl Default for Extra {
     fn default() -> Self {
@@ -120,8 +119,6 @@ impl Default for Extra {
             comment_occurrence: None,
             edit_occurrence: None,
             missing_image: None,
-            swatch_size: Vec2::new(48., 48.),
-            swatch_drag: None,
             journal_open: HashMap::new(),
             scope_owner: egui::ViewportId::ROOT,
             journal_all: false,
@@ -144,7 +141,6 @@ impl Default for Extra {
             table_search: String::new(),
             bookmarks: vec![("프로젝트 참고 자료".into(), "https://example.com".into())],
             size_applied: None,
-            custom_color: false,
         }
     }
 }
@@ -246,44 +242,85 @@ impl App {
         self.toast = format!("#{name} 프로젝트에 추가했습니다");
     }
     pub fn note_options(&mut self, ui: &mut egui::Ui, i: usize) {
+        let color = self.data.notes[i].color;
+        let response = ui
+            .menu_button("    ", |ui| {
+                crate::desktop::color_choices(ui, &mut self.data.notes[i].color)
+            })
+            .response;
+        ui.painter()
+            .rect_filled(response.rect.shrink(4.), 4., color);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "메모 색상 선택")
+        });
+        response.on_hover_text("메모 색상");
+    }
+    pub fn detached_note(&mut self, ctx: &egui::Context) {
+        self.render_note_windows(ctx);
+    }
+    pub fn date_controls(&mut self, ui: &mut egui::Ui, i: usize) {
+        let today = Local::now().date_naive();
+        let start = self.data.notes[i].date;
+        let time = self.data.notes[i].time;
+        let end = start.map(|d| d + Duration::days(self.data.notes[i].duration.max(1) as i64 - 1));
+        let end_time = self.data.notes[i].end_time.unwrap_or(time);
         ui.horizontal_wrapped(|ui| {
-            let color = self.data.notes[i].color;
-            let menu = ui.menu_button("     ", |ui| {
-                ui.label(RichText::new("메모 색상").small().color(MUTED));
-                ui.horizontal_wrapped(|ui| {
-                    for color in PALETTE {
-                        let r = ui.add_sized([26., 26.], egui::Button::new("").fill(color));
-                        r.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                format!(
-                                    "색상 #{:02X}{:02X}{:02X}",
-                                    color.r(),
-                                    color.g(),
-                                    color.b()
-                                ),
-                            )
-                        });
-                        if r.clicked() {
-                            self.data.notes[i].color = color;
-                            ui.close_menu();
+            let label = start
+                .map(|d| format!("시작  {} {}", d.format("%m.%d"), time.format("%H:%M")))
+                .unwrap_or_else(|| "시작일 선택".into());
+            if crate::icons::text_button(
+                ui,
+                crate::icons::Icon::Calendar,
+                &label,
+                "일정 시작 날짜와 시간",
+            )
+            .clicked()
+            {
+                let mut p = Picker::new(0, start.unwrap_or(today), time);
+                p.owner = ui.ctx().viewport_id();
+                p.bound_note = Some((i, self.extra.edit_occurrence));
+                self.extra.picker = Some(p);
+            }
+            let label = end
+                .map(|d| format!("종료  {} {}", d.format("%m.%d"), end_time.format("%H:%M")))
+                .unwrap_or_else(|| "종료일 선택".into());
+            if crate::icons::text_button(
+                ui,
+                crate::icons::Icon::Calendar,
+                &label,
+                "일정 종료 날짜와 시간",
+            )
+            .clicked()
+            {
+                let mut p = Picker::new(9, end.unwrap_or(today), end_time);
+                p.owner = ui.ctx().viewport_id();
+                p.bound_note = Some((i, self.extra.edit_occurrence));
+                self.extra.picker = Some(p);
+            }
+            ui.checkbox(&mut self.data.notes[i].recurring, "정기 일정")
+                .on_hover_text("정기 일정 표시 · 반복 엔진은 후속 연결");
+            ui.checkbox(&mut self.data.notes[i].wiki, "위키");
+        });
+        ui.add_space(5.);
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt(("memo_project", i))
+                .width(160.)
+                .selected_text(
+                    self.data.notes[i]
+                        .project
+                        .map(|p| self.data.projects[p].as_str())
+                        .unwrap_or("프로젝트 없음"),
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.data.notes[i].project, None, "프로젝트 없음");
+                    for (p, name) in self.data.projects.iter().enumerate() {
+                        if !self.extra.hidden_projects.contains(&p)
+                            && !self.extra.deleted_projects.contains(&p)
+                        {
+                            ui.selectable_value(&mut self.data.notes[i].project, Some(p), name);
                         }
                     }
                 });
-                ui.separator();
-                if ui.button("사용자 지정 색상…").clicked() {
-                    self.extra.custom_color = true;
-                    ui.close_menu();
-                }
-            });
-            ui.painter()
-                .rect_filled(menu.response.rect.shrink(4.), 4., color);
-            menu.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "메모 색상 선택")
-            });
-            menu.response.on_hover_text("메모 색상");
-            ui.checkbox(&mut self.data.notes[i].topmost, "항상 위에");
             ui.label(
                 RichText::new(format!(
                     "{} 생성",
@@ -292,47 +329,19 @@ impl App {
                 .size(11.)
                 .color(MUTED),
             );
-        });
-    }
-    pub fn detached_note(&mut self, ctx: &egui::Context) {
-        self.render_note_windows(ctx);
-    }
-    pub fn date_controls(&mut self, ui: &mut egui::Ui, i: usize) {
-        ui.label(RichText::new("일정").small().color(MUTED));
-        ui.horizontal_wrapped(|ui| {
-            let n = &self.data.notes[i];
-            let day = n.date.unwrap_or(Local::now().date_naive());
-            let text = n
-                .date
-                .map(|d| format!("{}  {}", d.format("%Y.%m.%d"), n.time.format("%H:%M")))
-                .unwrap_or("날짜와 시간 선택".into());
-            if ui.button(text).clicked() {
-                self.extra.picker = Some(Picker::new(0, day, self.data.notes[i].time));
-            }
-            let n = &mut self.data.notes[i];
-            let old = n.duration;
-            egui::ComboBox::from_id_salt("duration_days")
-                .selected_text(format!("{}일", n.duration))
-                .show_ui(ui, |ui| {
-                    for d in 1..=5 {
-                        ui.selectable_value(&mut n.duration, d, format!("{d}일"));
-                    }
-                });
-            if old != n.duration {
-                n.refresh_done();
-            }
-            ui.checkbox(&mut n.recurring, "정기 일정")
-                .on_hover_text("반복 표시 · 실제 반복 계산은 아직 연결 전입니다");
-        });
-        if let Some(t) = self.editor_completion() {
-            ui.add_space(4.);
-            ui.horizontal_wrapped(|ui| {
-                ui.label("완료 시간 :");
-                if ui.button(t.format("%Y.%m.%d  %H:%M").to_string()).clicked() {
-                    self.extra.picker = Some(Picker::new(8, t.date(), t.time()));
+            if let Some(t) = self.editor_completion() {
+                if ui
+                    .small_button(format!("완료 시간 : {}", t.format("%m.%d %H:%M")))
+                    .on_hover_text("완료 기록 날짜와 시간 수정")
+                    .clicked()
+                {
+                    let mut p = Picker::new(8, t.date(), t.time());
+                    p.owner = ui.ctx().viewport_id();
+                    p.bound_note = Some((i, self.extra.edit_occurrence));
+                    self.extra.picker = Some(p);
                 }
-            });
-        }
+            }
+        });
     }
     pub fn picker_window(&mut self, ctx: &egui::Context) {
         let Some(mut p) = self.extra.picker.take() else {
@@ -340,6 +349,11 @@ impl App {
         };
         if p.owner != ctx.viewport_id() {
             self.extra.picker = Some(p);
+            return;
+        }
+        if p.bound_note
+            .is_some_and(|bound| bound != (self.active, self.extra.edit_occurrence))
+        {
             return;
         }
         if p.target == 8 && self.editor_completion().is_none() {
@@ -412,8 +426,17 @@ impl App {
                     let n = &mut self.data.notes[self.active];
                     n.move_start(p.date);
                     n.time = chrono::NaiveTime::from_hms_opt(p.hour, p.minute, 0).unwrap();
+                    if n.duration == 1 && n.end_time.is_some_and(|t| t < n.time) {
+                        n.end_time = Some(n.time);
+                    }
                     self.date_edit = p.date.to_string();
                     self.time_edit = n.time.format("%H:%M").to_string();
+                }
+                9 => {
+                    let n = &mut self.data.notes[self.active];
+                    let chosen = p.date.and_hms_opt(p.hour, p.minute, 0).unwrap();
+                    let current = n.date.unwrap_or(p.date).and_time(n.time);
+                    n.set_span(current, chosen);
                 }
                 1 => self.journal_date = p.date.to_string(),
                 2 => {
@@ -990,5 +1013,36 @@ mod tests {
         assert_eq!(a.data.notes[2].parents, vec![0, 1]);
         assert_eq!(a.data.links, links);
         assert_eq!(a.data.notes[0].pos, Vec2::new(30., 30.));
+    }
+}
+
+#[cfg(test)]
+mod picker_binding_tests {
+    use super::*;
+    #[test]
+    fn time_picker_for_one_completed_occurrence_cannot_edit_another_completed_day() {
+        let first = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let next = first + Duration::days(1);
+        let mut app = App::sample(first);
+        app.data.notes[0].duration = 3;
+        let t0 = first.and_hms_opt(10, 0, 0).unwrap();
+        let t1 = next.and_hms_opt(11, 0, 0).unwrap();
+        app.complete_span(0, first, true, false, t0);
+        app.complete_span(0, next, true, false, t1);
+        app.open_note_on(0, Some(first));
+        let ctx = egui::Context::default();
+        let mut picker = Picker::new(8, first, t0.time());
+        picker.owner = ctx.viewport_id();
+        picker.bound_note = Some((0, Some(first)));
+        app.extra.picker = Some(picker);
+        app.open_note_on(0, Some(next));
+        assert_eq!(app.editor_completion(), Some(t1));
+        app.picker_window(&ctx);
+        assert!(app.extra.picker.is_none());
+        assert_eq!(
+            app.data.notes[0].occurrence_completed.get(&first),
+            Some(&t0)
+        );
+        assert_eq!(app.data.notes[0].occurrence_completed.get(&next), Some(&t1));
     }
 }

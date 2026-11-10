@@ -42,6 +42,54 @@ pub struct Catalog {
     drag_sources: Vec<(egui::Rect, FolderDrag)>,
     drag_targets: Vec<(egui::Rect, Option<usize>)>,
     dragging: Option<(FolderDrag, egui::Pos2)>,
+    table_offset: f32,
+    table_viewport_width: f32,
+}
+
+const COLUMN_WIDTHS: [f32; 8] = [32., 32., 180., 240., 140., 85., 140., 32.];
+const TABLE_WIDTH: f32 = 881.;
+
+#[derive(Clone, Copy)]
+enum TableRow {
+    Note(usize, Option<NaiveDate>),
+    Tab(usize, usize),
+}
+
+enum TableCommand {
+    Toggle(usize),
+    Complete(usize, Option<NaiveDate>, bool),
+    Reminder(usize),
+    Open(usize, Option<NaiveDate>),
+    Trash(usize),
+    Restore(usize),
+    Purge(usize),
+    RestoreTab(usize, usize),
+    PurgeTab(usize, usize),
+}
+
+fn table_cells(rect: egui::Rect) -> [egui::Rect; 8] {
+    let mut x = rect.left();
+    std::array::from_fn(|i| {
+        let r = egui::Rect::from_min_size(
+            egui::pos2(x, rect.top()),
+            Vec2::new(COLUMN_WIDTHS[i], rect.height()),
+        );
+        x += COLUMN_WIDTHS[i];
+        r
+    })
+}
+
+fn table_cell(ui: &mut egui::Ui, rect: egui::Rect, salt: impl std::hash::Hash) -> egui::Ui {
+    let rect = rect.shrink2(Vec2::new(3., 2.));
+    let mut cell = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(salt)
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    cell.set_clip_rect(ui.clip_rect().intersect(rect));
+    cell.spacing_mut().item_spacing.x = 4.;
+    cell
 }
 
 impl Catalog {
@@ -536,193 +584,382 @@ impl App {
         let height = panel_height(ui);
         let rect =
             egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), height));
+        let preview_width = 300_f32.min(rect.width() * 0.42).max(250.);
+        let list_width = (rect.width() - preview_width - 16.).max(180.);
+        let table_rows: Vec<_> = rows.iter().map(|&(i, d)| TableRow::Note(i, d)).collect();
         ui.allocate_new_ui(
             egui::UiBuilder::new()
                 .max_rect(rect)
                 .layout(egui::Layout::top_down(egui::Align::LEFT)),
             |ui| {
                 ui.set_min_size(rect.size());
-                ui.set_clip_rect(ui.clip_rect().intersect(rect));
-                ui.columns(2, |cols| {
-                    for column in cols.iter_mut() {
-                        column.set_height(height);
-                    }
-                    egui::ScrollArea::vertical()
-                        .id_salt("catalog_note_list")
-                        .max_height(height)
-                        .auto_shrink([false, false])
-                        .show(&mut cols[0], |ui| {
-                            if rows.is_empty() {
-                                ui.add_space(30.);
-                                ui.label(RichText::new("표시할 메모가 없습니다").color(MUTED));
-                            }
-                            let mut previous = Some(NaiveDate::MIN);
-                            for &(i, day) in rows {
-                                if date_groups && previous != day {
-                                    ui.add_space(10.);
-                                    ui.strong(
-                                        day.map(|d| d.format("%m월 %d일").to_string())
-                                            .unwrap_or("일정 없는 메모".into()),
-                                    );
-                                    ui.add_space(4.);
-                                    previous = day;
-                                }
-                                self.catalog_detail_row(ui, i, day, open_editor, false);
-                            }
-                        });
-                    self.catalog_preview(&mut cols[1], height);
-                });
+                let list_rect = egui::Rect::from_min_size(rect.min, Vec2::new(list_width, height));
+                let preview_rect = egui::Rect::from_min_size(
+                    egui::pos2(list_rect.right() + 16., rect.top()),
+                    Vec2::new(preview_width, height),
+                );
+                let mut list = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt("detail_table_pane")
+                        .max_rect(list_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                list.set_clip_rect(ui.clip_rect().intersect(list_rect));
+                self.catalog_table(
+                    &mut list,
+                    &table_rows,
+                    height,
+                    open_editor,
+                    false,
+                    date_groups,
+                );
+                let mut preview = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt("detail_preview_pane")
+                        .max_rect(preview_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                preview.set_clip_rect(ui.clip_rect().intersect(preview_rect));
+                self.catalog_preview(&mut preview, height);
             },
         );
     }
 
-    fn catalog_detail_row(
+    fn catalog_table(
         &mut self,
         ui: &mut egui::Ui,
-        i: usize,
-        day: Option<NaiveDate>,
+        rows: &[TableRow],
+        height: f32,
         open_editor: bool,
         trash: bool,
+        date_groups: bool,
     ) {
-        ui.push_id(("catalog_note", i, day, trash), |ui| {
-            let (padding, gap) = match self.desktop.row_spacing {
-                0 => (6., 4.),
-                2 => (14., 12.),
-                _ => (10., 7.),
+        let header_width = if self.catalog.table_viewport_width > 0. {
+            self.catalog.table_viewport_width.min(ui.available_width())
+        } else {
+            ui.available_width()
+        };
+        let offset = self
+            .catalog
+            .table_offset
+            .clamp(0., (TABLE_WIDTH - header_width).max(0.));
+        egui::ScrollArea::horizontal()
+            .id_salt(("table_header", trash))
+            .horizontal_scroll_offset(offset)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .auto_shrink([false, false])
+            .max_width(header_width)
+            .max_height(36.)
+            .show(ui, |ui| {
+                ui.set_min_width(TABLE_WIDTH);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(TABLE_WIDTH, 36.), Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 0., ui.visuals().faint_bg_color);
+                ui.painter().line_segment(
+                    [rect.left_bottom(), rect.right_bottom()],
+                    Stroke::new(1_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                );
+                let cells = table_cells(rect);
+                for (col, title) in [
+                    if trash { "복원" } else { "표시" },
+                    "완료",
+                    "제목",
+                    "내용",
+                    "알람",
+                    "생성일",
+                    "일정",
+                    "삭제",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let mut cell = table_cell(ui, cells[col], ("header", col));
+                    cell.add(
+                        egui::Label::new(RichText::new(*title).size(12.).color(MUTED).strong())
+                            .truncate(),
+                    );
+                }
+            });
+        let mut pending = vec![];
+        let body = egui::ScrollArea::both()
+            .id_salt(("detail_table_body", trash))
+            .horizontal_scroll_offset(offset)
+            .auto_shrink([false, false])
+            .max_height((height - 44.).max(100.))
+            .show(ui, |ui| {
+                ui.set_min_width(TABLE_WIDTH);
+                if rows.is_empty() {
+                    ui.add_space(24.);
+                    ui.label(RichText::new("표시할 메모가 없습니다").color(MUTED));
+                }
+                let mut previous = Some(NaiveDate::MIN);
+                for (at, &row) in rows.iter().enumerate() {
+                    if let TableRow::Note(_, day) = row {
+                        if date_groups && previous != day {
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::new(TABLE_WIDTH, 26.), Sense::hover());
+                            ui.painter().text(
+                                rect.left_center() + Vec2::new(7., 0.),
+                                egui::Align2::LEFT_CENTER,
+                                day.map(|d| d.format("%m월 %d일").to_string())
+                                    .unwrap_or("일정 없는 메모".into()),
+                                egui::FontId::proportional(12.),
+                                MUTED,
+                            );
+                            previous = day;
+                        }
+                    }
+                    self.catalog_table_row(ui, row, at, open_editor, trash, &mut pending);
+                }
+            });
+        self.catalog.table_offset = body.state.offset.x;
+        self.catalog.table_viewport_width = body.inner_rect.width();
+        for command in pending {
+            match command {
+                TableCommand::Toggle(i) => self.toggle_sticker(i),
+                TableCommand::Complete(i, d, done) => {
+                    self.done_at(i, d, done);
+                    self.extra.scope_owner = ui.ctx().viewport_id();
+                }
+                TableCommand::Reminder(i) => self.open_reminder(i),
+                TableCommand::Open(i, d) => self.open_note_on(i, d),
+                TableCommand::Trash(i) => self.trash_note(i),
+                TableCommand::Restore(i) => self.restore_note(i),
+                TableCommand::Purge(i) => self.request_purge(i),
+                TableCommand::RestoreTab(i, t) => {
+                    self.catalog_restore_tab(i, t);
+                }
+                TableCommand::PurgeTab(i, t) => self.catalog.purge_tab = Some((i, t)),
+            }
+        }
+    }
+
+    fn catalog_table_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        row: TableRow,
+        at: usize,
+        open_editor: bool,
+        trash: bool,
+        pending: &mut Vec<TableCommand>,
+    ) {
+        let (i, day, tab) = match row {
+            TableRow::Note(i, d) => (i, d, None),
+            TableRow::Tab(i, t) => (i, self.data.notes[i].date, Some(t)),
+        };
+        let n = &self.data.notes[i];
+        let title = if let Some(t) = tab {
+            let Some(t) = n.document.trash.get(t) else {
+                return;
             };
-            let selected =
-                self.catalog.selected == Some(i) || self.catalog.selected_many.contains(&i);
+            format!("{} - {}", n.title, t.title)
+        } else {
+            n.title.clone()
+        };
+        let body = if n.locked {
+            "잠긴 메모".into()
+        } else if let Some(t) = tab {
+            n.document.trash[t].body.replace('\n', " ")
+        } else {
+            n.body.replace('\n', " ")
+        };
+        let reminder = n.reminder.map(|t| t.format("%m/%d %H:%M").to_string());
+        let created = n.created.format("%y%m%d").to_string();
+        let schedule = day
+            .map(|d| format!("{} {}", d.format("%m/%d"), n.time.format("%H:%M")))
+            .unwrap_or("—".into());
+        let mut done = n.done_on(day);
+        let locked = n.locked;
+        let selected = self.catalog.selected == Some(i) || self.catalog.selected_many.contains(&i);
+        let height = match self.desktop.row_spacing {
+            0 => 38.,
+            2 => 58.,
+            _ => 48.,
+        };
+        ui.push_id(("table_row", i, day, tab, trash), |ui| {
+            let (rect, response) =
+                ui.allocate_exact_size(Vec2::new(TABLE_WIDTH, height), Sense::hover());
             let fill = if selected {
                 ui.visuals().selection.bg_fill
-            } else {
+            } else if at % 2 == 1 {
                 ui.visuals().faint_bg_color
+            } else {
+                Color32::TRANSPARENT
             };
-            let frame = egui::Frame::NONE
-                .fill(fill)
-                .corner_radius(7.)
-                .inner_margin(padding)
-                .stroke(Stroke::new(
+            ui.painter().rect_filled(rect, 0., fill);
+            ui.painter().line_segment(
+                [rect.left_bottom(), rect.right_bottom()],
+                Stroke::new(
                     1_f32,
-                    if selected {
-                        ACCENT.gamma_multiply(0.4)
-                    } else {
-                        Color32::TRANSPARENT
-                    },
-                ));
-            let inner = frame.show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if trash {
-                        if action(ui, Action::Restore, "휴지통에서 복원", false).clicked() {
-                            self.restore_note(i);
-                        }
-                    } else {
-                        let opened = self.studio.windows.get(&i).is_some_and(|w| w.open);
-                        if action(ui, Action::Eye, "스티커 표시 / 숨기기", opened).clicked()
-                        {
-                            self.toggle_sticker(i);
-                        }
-                        let mut done = self.data.notes[i].done_on(day);
-                        if ui
-                            .checkbox(&mut done, "")
-                            .on_hover_text("완료 상태")
-                            .changed()
-                        {
-                            self.done_at(i, day, done);
-                            self.extra.scope_owner = ui.ctx().viewport_id();
-                        }
+                    ui.visuals()
+                        .widgets
+                        .noninteractive
+                        .bg_stroke
+                        .color
+                        .gamma_multiply(0.18),
+                ),
+            );
+            let cells = table_cells(rect);
+            {
+                let mut c = table_cell(ui, cells[0], "eye");
+                if trash {
+                    if action(&mut c, Action::Restore, "복원하기", false)
+                        .on_hover_text("복원하기")
+                        .clicked()
+                    {
+                        pending.push(if let Some(t) = tab {
+                            TableCommand::RestoreTab(i, t)
+                        } else {
+                            TableCommand::Restore(i)
+                        });
                     }
-                    let n = &self.data.notes[i];
-                    let text = if n.done_on(day) {
-                        RichText::new(&n.title).strong().strikethrough()
-                    } else {
-                        RichText::new(&n.title).strong()
-                    };
-                    let title =
-                        ui.add(egui::Label::new(text).wrap().sense(Sense::click_and_drag()));
-                    self.catalog_note_response(ui, &title, i, day, open_editor && !trash);
-                    if self.data.notes[i].locked {
-                        ui.label(RichText::new("잠김").small().color(MUTED));
-                    }
-                });
-                let body = if self.data.notes[i].locked {
-                    "잠긴 메모의 내용은 표시하지 않습니다".into()
                 } else {
-                    shorten(&self.data.notes[i].body.replace('\n', " "), 90)
-                };
-                let body = ui.add(
-                    egui::Label::new(RichText::new(body).small().color(MUTED))
-                        .wrap()
+                    let opened = self.studio.windows.get(&i).is_some_and(|w| w.open);
+                    if action(&mut c, Action::Eye, "스티커 표시 / 숨기기", opened).clicked()
+                    {
+                        pending.push(TableCommand::Toggle(i));
+                    }
+                }
+            }
+            {
+                let mut c = table_cell(ui, cells[1], "done");
+                if c.add_enabled(!trash, egui::Checkbox::new(&mut done, ""))
+                    .on_hover_text("완료 상태")
+                    .changed()
+                {
+                    pending.push(TableCommand::Complete(i, day, done));
+                }
+            }
+            {
+                let mut c = table_cell(ui, cells[2], "title");
+                let mut text = RichText::new(&title).strong();
+                if done {
+                    text = text.strikethrough().color(MUTED);
+                }
+                let r = c
+                    .add(
+                        egui::Label::new(text)
+                            .truncate()
+                            .sense(Sense::click_and_drag()),
+                    )
+                    .on_hover_text(&title);
+                if tab.is_none() && !trash {
+                    self.catalog_note_response(&mut c, &r, i, day, open_editor);
+                } else if r.clicked() {
+                    self.catalog_select(&c, i, day);
+                }
+            }
+            {
+                let mut c = table_cell(ui, cells[3], "body");
+                let r = c.add(
+                    egui::Label::new(RichText::new(shorten(&body, 100)).color(MUTED))
+                        .truncate()
                         .sense(Sense::click_and_drag()),
                 );
-                self.catalog_note_response(ui, &body, i, day, open_editor && !trash);
-                ui.add_space(5.);
-                ui.horizontal_wrapped(|ui| {
-                    let n = &self.data.notes[i];
-                    ui.label(
-                        RichText::new(format!("생성 {}", n.created.format("%y%m%d")))
-                            .size(11.)
-                            .color(MUTED),
-                    );
-                    if let Some(project) = n.project.and_then(|p| self.data.projects.get(p)) {
-                        ui.label(RichText::new(format!("#{project}")).size(11.).color(MUTED));
-                    }
-                    if !trash {
-                        let alarm = self.data.notes[i]
-                            .reminder
-                            .map(|t| t.format("%m/%d %H:%M").to_string());
-                        if action(ui, Action::Bell, "알람 설정", alarm.is_some()).clicked() {
-                            self.open_reminder(i);
-                        }
-                        if let Some(alarm) = alarm {
-                            if ui.small_button(alarm).clicked() {
-                                self.open_reminder(i);
-                            }
-                        }
-                        let date = day
-                            .map(|d| {
-                                format!(
-                                    "{} {}시",
-                                    d.format("%m/%d"),
-                                    self.data.notes[i].time.format("%H")
-                                )
-                            })
-                            .unwrap_or("일정 없음".into());
-                        if ui.small_button(date).on_hover_text("일정 편집").clicked() {
-                            self.open_note_on(i, day);
-                        }
-                    }
-                    if action(
-                        ui,
-                        Action::Trash,
-                        if trash {
-                            "영구 삭제"
-                        } else {
-                            "휴지통으로 이동"
-                        },
-                        false,
-                    )
-                    .clicked()
-                    {
-                        if trash {
-                            self.request_purge(i);
-                        } else {
-                            self.trash_note(i);
-                        }
-                    }
-                });
-            });
-            // Do not put a clickable overlay over the row: its child controls
-            // (complete, alarm, recycle) must remain independently clickable.
-            let row = inner.response;
-            if selected
-                && ui.input(|i| {
-                    i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowDown)
-                })
-                && !ui.ctx().wants_keyboard_input()
-            {
-                row.scroll_to_me(Some(egui::Align::Center));
+                let r = if locked {
+                    r.on_hover_text("잠금 해제 후 내용을 확인할 수 있습니다")
+                } else {
+                    r.on_hover_text(&body)
+                };
+                if tab.is_none() && !trash {
+                    self.catalog_note_response(&mut c, &r, i, day, open_editor);
+                } else if r.clicked() {
+                    self.catalog_select(&c, i, day);
+                }
             }
-            ui.add_space(gap);
+            {
+                let mut c = table_cell(ui, cells[4], "reminder");
+                if !trash {
+                    let has = reminder.is_some();
+                    if action(&mut c, Action::Bell, "알람 설정", has).clicked() {
+                        pending.push(TableCommand::Reminder(i));
+                    }
+                    if let Some(text) = reminder {
+                        if c.add(
+                            egui::Label::new(RichText::new(text).size(12.).color(if has {
+                                ACCENT
+                            } else {
+                                MUTED
+                            }))
+                            .truncate()
+                            .sense(Sense::click()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                        {
+                            pending.push(TableCommand::Reminder(i));
+                        }
+                    }
+                } else {
+                    c.add(
+                        egui::Label::new(
+                            RichText::new(reminder.unwrap_or("—".into()))
+                                .size(12.)
+                                .color(MUTED),
+                        )
+                        .truncate(),
+                    );
+                }
+            }
+            {
+                let mut c = table_cell(ui, cells[5], "created");
+                c.add(egui::Label::new(RichText::new(created).size(12.).color(MUTED)).truncate());
+            }
+            {
+                let mut c = table_cell(ui, cells[6], "schedule");
+                let r = c.add(
+                    egui::Label::new(RichText::new(schedule).size(12.).color(MUTED))
+                        .truncate()
+                        .sense(if trash {
+                            Sense::hover()
+                        } else {
+                            Sense::click()
+                        }),
+                );
+                if !trash
+                    && r.on_hover_text("일정 편집")
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                {
+                    pending.push(TableCommand::Open(i, day));
+                }
+            }
+            {
+                let mut c = table_cell(ui, cells[7], "delete");
+                if action(
+                    &mut c,
+                    Action::Trash,
+                    if trash {
+                        "영구 삭제"
+                    } else {
+                        "휴지통으로 이동"
+                    },
+                    false,
+                )
+                .clicked()
+                {
+                    pending.push(if let Some(t) = tab {
+                        TableCommand::PurgeTab(i, t)
+                    } else if trash {
+                        TableCommand::Purge(i)
+                    } else {
+                        TableCommand::Trash(i)
+                    });
+                }
+            }
+            if selected
+                && !ui.ctx().wants_keyboard_input()
+                && ui.input(|i| {
+                    i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowUp)
+                })
+            {
+                let target = egui::Rect::from_min_max(
+                    egui::pos2(ui.clip_rect().left() + 2., rect.top()),
+                    egui::pos2(ui.clip_rect().left() + 3., rect.bottom()),
+                );
+                ui.scroll_to_rect(target, Some(egui::Align::Center));
+            }
+            let _ = response;
         });
     }
 
@@ -784,50 +1021,27 @@ impl App {
                 });
             return;
         };
-        let base = self.data.notes[i].color;
-        let paper = Color32::from_rgb(
-            ((base.r() as u16 + 3 * 255) / 4) as u8,
-            ((base.g() as u16 + 3 * 255) / 4) as u8,
-            ((base.b() as u16 + 3 * 255) / 4) as u8,
-        );
-        egui::Frame::NONE
-            .fill(if self.dark {
-                ui.visuals().faint_bg_color
-            } else {
-                paper
-            })
-            .corner_radius(9.)
-            .inner_margin(16.)
-            .show(ui, |ui| {
-                ui.set_height(height - 32.);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("메모 미리보기 · 바로 편집")
-                            .small()
-                            .color(MUTED),
-                    );
-                    if crate::icons::icon_button(
-                        ui,
-                        crate::icons::Icon::Sticky,
-                        "독립 스티커로 열기",
-                    )
-                    .clicked()
-                    {
-                        self.open_sticker(i, self.catalog.selected_day);
-                    }
-                });
-                ui.separator();
-                if self.data.notes[i].locked {
+        // inline_note already draws the rounded, colored paper. Wrapping it
+        // in another Frame would add a second card, duplicate chrome and take
+        // useful width away from the title and body.
+        ui.set_height(height);
+        if self.data.notes[i].locked {
+            egui::Frame::NONE
+                .fill(ui.visuals().faint_bg_color)
+                .corner_radius(18.)
+                .inner_margin(20.)
+                .show(ui, |ui| {
+                    ui.set_min_height((height - 40.).max(120.));
                     ui.heading(&self.data.notes[i].title);
-                    ui.add_space(30.);
-                    ui.label("잠긴 메모입니다");
+                    ui.add_space(24.);
+                    ui.label(RichText::new("잠긴 메모입니다").color(MUTED));
                     if ui.button("잠금 해제하기").clicked() {
                         self.open_note(i);
                     }
-                } else {
-                    self.inline_note(ui, i);
-                }
-            });
+                });
+        } else {
+            self.inline_note(ui, i);
+        }
     }
 
     fn catalog_folders(&mut self, ui: &mut egui::Ui) {
@@ -1206,18 +1420,20 @@ impl App {
     pub fn trash_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("휴지통");
         ui.label(
-            RichText::new("삭제한 메모를 복원하거나 영구 삭제합니다. 현재 실행 중에만 보관됩니다.")
-                .small()
-                .color(MUTED),
+            RichText::new(
+                "삭제한 메모와 본문 탭을 복원하거나 영구 삭제합니다. 현재 실행 중에만 보관됩니다.",
+            )
+            .small()
+            .color(MUTED),
         );
-        ui.add_space(12.);
-        let ids: Vec<_> = self
+        ui.add_space(10.);
+        let notes: Vec<_> = self
             .data
             .notes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.deleted && !n.purged)
-            .map(|(i, _)| i)
+            .map(|(i, n)| TableRow::Note(i, n.date))
             .collect();
         let tabs: Vec<_> = self
             .data
@@ -1225,86 +1441,31 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, n)| !n.purged)
-            .flat_map(|(i, n)| (0..n.document.trash.len()).map(move |tab| (i, tab)))
+            .flat_map(|(i, n)| (0..n.document.trash.len()).map(move |t| TableRow::Tab(i, t)))
             .collect();
-        if ids.is_empty() && tabs.is_empty() {
-            ui.add_space(30.);
+        ui.label(
+            RichText::new(format!("메모 {}개 · 본문 탭 {}개", notes.len(), tabs.len()))
+                .small()
+                .color(MUTED),
+        );
+        let rows: Vec<_> = notes.into_iter().chain(tabs).collect();
+        if rows.is_empty() {
+            ui.add_space(24.);
             ui.label("휴지통이 비어 있습니다");
         } else {
-            if !ids.is_empty() {
-                ui.strong(format!("삭제한 메모 · {}개", ids.len()));
-            }
-            for i in ids {
-                self.catalog_detail_row(ui, i, self.data.notes[i].date, false, true);
-            }
-            if !tabs.is_empty() {
-                ui.add_space(10.);
-                ui.strong(format!("삭제한 본문 탭 · {}개", tabs.len()));
-                ui.label(
-                    RichText::new("탭을 복원하면 원래 메모의 본문 탭으로 돌아갑니다")
-                        .small()
-                        .color(MUTED),
-                );
-            }
-            // A restore removes an element and changes subsequent indices in
-            // that document. Apply at most one row action after rendering.
-            let mut restore = None;
-            let mut purge = None;
-            for (i, tab) in tabs {
-                let n = &self.data.notes[i];
-                let item = &n.document.trash[tab];
-                let title = format!("{} - {}", n.title, item.title);
-                let body = if n.locked {
-                    "잠긴 메모의 내용은 표시하지 않습니다".into()
-                } else {
-                    shorten(&item.body, 180)
-                };
-                ui.push_id(("deleted_tab", i, tab), |ui| {
-                    egui::Frame::NONE
-                        .fill(ui.visuals().faint_bg_color)
-                        .corner_radius(7.)
-                        .inner_margin(12.)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                if action(ui, Action::Restore, "본문 탭 복원", false).clicked()
-                                {
-                                    restore = Some((i, tab));
-                                }
-                                let width = (ui.available_width() - 34.).max(80.);
-                                ui.add_sized(
-                                    [width, 26.],
-                                    egui::Label::new(RichText::new(title).strong()).truncate(),
-                                );
-                                if action(ui, Action::Trash, "본문 탭 영구 삭제", false).clicked()
-                                {
-                                    purge = Some((i, tab));
-                                }
-                            });
-                            ui.label(RichText::new(body).small().color(MUTED));
-                            if !n.locked && !item.blocks.is_empty() {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "표·이미지 {}개 포함",
-                                        item.blocks.len()
-                                    ))
-                                    .small()
-                                    .color(MUTED),
-                                );
-                            }
-                        });
-                    ui.add_space(match self.desktop.row_spacing {
-                        0 => 4.,
-                        2 => 12.,
-                        _ => 7.,
-                    });
-                });
-            }
-            if let Some((i, tab)) = restore {
-                self.catalog_restore_tab(i, tab);
-            }
-            if let Some(target) = purge {
-                self.catalog.purge_tab = Some(target);
-            }
+            let height = panel_height(ui);
+            let rect =
+                egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), height));
+            ui.allocate_new_ui(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                |ui| {
+                    ui.set_min_size(rect.size());
+                    ui.set_clip_rect(ui.clip_rect().intersect(rect));
+                    self.catalog_table(ui, &rows, height, false, true, false);
+                },
+            );
         }
         self.catalog_tab_purge_dialog(ui.ctx());
     }
@@ -1592,6 +1753,112 @@ fn find_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn render_table_layout(a: &mut App, ctx: &egui::Context, width: f32) -> egui::FullOutput {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 760.));
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::SidePanel::left("table_test_sidebar")
+                    .exact_width(220.)
+                    .show(ctx, |_| {});
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    a.catalog_split_list(ui, &[(0, a.data.notes[0].date)], false, false);
+                });
+            },
+        )
+    }
+
+    fn text_rect(output: &egui::FullOutput, text: &str, before_x: f32) -> egui::Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(t) = &shape.shape {
+                    let rect = t.galley.rect.translate(t.pos.to_vec2());
+                    if t.galley.job.text == text
+                        && rect.left() < before_x
+                        && shape.clip_rect.intersects(rect)
+                    {
+                        return Some(rect);
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| panic!("visible table text missing: {text}"))
+    }
+
+    fn representative_table_app() -> App {
+        let mut a = App::sample(Local::now().date_naive());
+        let n = &mut a.data.notes[0];
+        n.title = "COLUMN TITLE".into();
+        n.body = "COLUMN BODY".into();
+        n.created = NaiveDate::from_ymd_opt(2026, 1, 2)
+            .unwrap()
+            .and_hms_opt(1, 2, 3)
+            .unwrap();
+        n.reminder = Some(
+            NaiveDate::from_ymd_opt(2026, 2, 3)
+                .unwrap()
+                .and_hms_opt(4, 5, 0)
+                .unwrap(),
+        );
+        n.date = NaiveDate::from_ymd_opt(2026, 11, 10);
+        n.time = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        a
+    }
+
+    #[test]
+    fn detailed_table_keeps_fields_on_one_horizontal_row_with_aligned_headers() {
+        let mut a = representative_table_app();
+        let ctx = egui::Context::default();
+        render_table_layout(&mut a, &ctx, 1440.);
+        let out = render_table_layout(&mut a, &ctx, 1440.);
+        let values = [
+            "COLUMN TITLE",
+            "COLUMN BODY",
+            "02/03 04:05",
+            "260102",
+            "11/10 09:00",
+        ]
+        .map(|s| text_rect(&out, s, 1110.));
+        assert!(values.windows(2).all(|p| p[0].left() < p[1].left()));
+        assert!(values
+            .iter()
+            .all(|r| (r.center().y - values[0].center().y).abs() < 4.));
+        for (name, index) in [("제목", 0), ("내용", 1), ("생성일", 3), ("일정", 4)] {
+            let header = text_rect(&out, name, 1110.);
+            assert!((header.left() - values[index].left()).abs() < 1.);
+            assert!(header.bottom() < values[index].top());
+        }
+        assert!(
+            a.catalog.table_viewport_width > 800.,
+            "300px preview must not take half the workspace"
+        );
+    }
+
+    #[test]
+    fn narrow_table_scroll_can_reach_delete_column_without_moving_the_preview() {
+        let mut a = representative_table_app();
+        let ctx = egui::Context::default();
+        a.catalog.table_offset = f32::MAX;
+        render_table_layout(&mut a, &ctx, 1100.);
+        let out = render_table_layout(&mut a, &ctx, 1100.);
+        let visible = a.catalog.table_viewport_width;
+        assert!(visible > 350. && visible < 650.);
+        assert!(a.catalog.table_offset > 200.);
+        let last = table_cells(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(TABLE_WIDTH, 48.),
+        ))[7];
+        assert!(last.center().x - a.catalog.table_offset > 0.);
+        assert!(last.right() - a.catalog.table_offset <= visible + 1.);
+        let header = text_rect(&out, "생성일", 780.);
+        let created = text_rect(&out, "260102", 780.);
+        assert!((header.left() - created.left()).abs() < 1.);
+    }
     #[test]
     fn folder_drop_uses_real_rendered_note_and_folder_bounds() {
         let mut a = App::sample(Local::now().date_naive());

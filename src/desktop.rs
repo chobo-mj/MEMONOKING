@@ -566,7 +566,7 @@ impl App {
                         if ui.button("썸네일 처리된 원본 일괄 정리").clicked() { self.desktop.last_action = "이미지 정리 정책을 선택했습니다. 이번 미리보기에서는 파일을 삭제하지 않습니다.".into(); }
                         ui.label(RichText::new("설정 화면 미리보기 · 저장 및 백업 엔진은 연결 전").color(MUTED));
                     }
-                    _ => { ui.heading("MEMONOKING"); ui.label("개인 메모와 일정 작업 공간"); ui.label("PPT 요구사항 반영 v1.8"); ui.separator(); ui.label("화면·조작 미리보기입니다. 앱을 종료하면 메모와 설정이 초기화됩니다."); }
+                    _ => { ui.heading("MEMONOKING"); ui.label("개인 메모와 일정 작업 공간"); ui.label("UI 미리보기 0.2.0"); ui.separator(); ui.label("화면·조작 미리보기입니다. 앱을 종료하면 메모와 설정이 초기화됩니다."); }
                 }
                 if !self.desktop.last_action.is_empty() { ui.add_space(12.); ui.colored_label(ACCENT, &self.desktop.last_action); }
                 });

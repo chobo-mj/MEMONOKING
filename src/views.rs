@@ -491,16 +491,8 @@ impl App {
     }
     pub fn note_editor(&mut self, ui: &mut egui::Ui) {
         let i = self.active;
-        ui.add(
-            egui::TextEdit::multiline(&mut self.data.notes[i].title)
-                .font(egui::FontId::proportional(28.))
-                .desired_rows(1)
-                .desired_width(f32::INFINITY)
-                .frame(false)
-                .hint_text("메모 제목"),
-        );
-        ui.add_space(8.);
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
+            self.note_options(ui, i);
             let n = &self.data.notes[i];
             let today = Local::now().date_naive();
             let occurrence = self.extra.edit_occurrence.or_else(|| {
@@ -511,97 +503,42 @@ impl App {
                 }
             });
             let mut done = n.done_on(occurrence);
-            if ui.checkbox(&mut done, "완료").changed() {
+            if ui.checkbox(&mut done, "").on_hover_text("완료").changed() {
                 self.done_at(i, occurrence, done);
                 self.extra.scope_owner = ui.ctx().viewport_id();
             }
-            ui.checkbox(&mut self.data.notes[i].starred, "중요");
-            ui.checkbox(&mut self.data.notes[i].wiki, "위키");
-            if self.data.notes[i].duration > 1 {
-                ui.label(
-                    RichText::new(format!(
-                        "{} / {}일 완료",
-                        self.data.notes[i].occurrence_completed.len(),
-                        self.data.notes[i].duration
-                    ))
-                    .small()
-                    .color(MUTED),
-                );
-            }
-        });
-        ui.add_space(8.);
-        self.note_options(ui, i);
-        ui.add_space(8.);
-        ui.separator();
-        ui.add_space(8.);
-        self.date_controls(ui, i);
-        ui.add_space(12.);
-        ui.label(RichText::new("프로젝트").small().color(MUTED));
-        let n = &mut self.data.notes[i];
-        ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("memo_project")
-                .selected_text(
-                    n.project
-                        .map(|p| self.data.projects[p].as_str())
-                        .unwrap_or("프로젝트 없음"),
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut n.project, None, "프로젝트 없음");
-                    for (p, name) in self.data.projects.iter().enumerate() {
-                        if !self.extra.hidden_projects.contains(&p)
-                            && !self.extra.deleted_projects.contains(&p)
-                        {
-                            ui.selectable_value(&mut n.project, Some(p), name);
-                        }
-                    }
-                });
-            if n.wiki {
-                ui.label(RichText::new("위키 폴더").small().color(MUTED));
-                egui::ComboBox::from_id_salt("wiki_folder_assignment")
-                    .selected_text(
-                        n.folder
-                            .map(|f| self.extra.folders[f].title.as_str())
-                            .unwrap_or("위키 미분류"),
-                    )
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut n.folder, None, "미분류");
-                        for (f, folder) in self.extra.folders.iter().enumerate() {
-                            ui.selectable_value(&mut n.folder, Some(f), &folder.title);
-                        }
-                    });
-            }
-        });
-        ui.add_space(14.);
-        ui.separator();
-        ui.add_space(12.);
-        n.document.toolbar_visible = true;
-        crate::composer::show(ui, &mut n.body, &mut n.document, ("full_editor", i));
-        self.consume_body_project(i);
-        self.consume_project_header(i);
-        let related: Vec<_> = self
-            .data
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(j, n)| {
-                self.visible(*j)
-                    && (n.parents.contains(&i) || self.data.links.contains(&(i.min(*j), i.max(*j))))
-            })
-            .map(|(j, _)| j)
-            .collect();
-        if !related.is_empty() {
-            ui.add_space(8.);
-            egui::CollapsingHeader::new(format!("연결된 메모 {}개", related.len())).show(
-                ui,
-                |ui| {
-                    for j in related {
-                        if ui.link(&self.data.notes[j].title).clicked() {
-                            self.open_note(j);
-                        }
-                    }
-                },
+            let width = (ui.available_width() - 36.).max(60.);
+            ui.add_sized(
+                [width, 32.],
+                egui::TextEdit::singleline(&mut self.data.notes[i].title)
+                    .font(egui::FontId::proportional(22.))
+                    .frame(false)
+                    .hint_text("메모 제목"),
             );
-        }
+            let starred = self.data.notes[i].starred;
+            ui.scope(|ui| {
+                if starred {
+                    ui.visuals_mut().override_text_color = Some(ACCENT);
+                }
+                if crate::icons::icon_button(
+                    ui,
+                    crate::icons::Icon::Star,
+                    if starred {
+                        "중요 표시 해제"
+                    } else {
+                        "중요 표시"
+                    },
+                )
+                .clicked()
+                {
+                    self.data.notes[i].starred = !starred;
+                }
+            });
+        });
+        ui.add_space(4.);
+        ui.separator();
+        ui.add_space(5.);
+        self.date_controls(ui, i);
     }
     pub fn journal(&mut self, ui: &mut egui::Ui) {
         self.journal_v2(ui);

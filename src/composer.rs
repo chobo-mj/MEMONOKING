@@ -140,6 +140,7 @@ pub struct Document {
     ime: bool,
     zoom_until: f64,
     aliases: Vec<(String, String)>,
+    first_tab_changed: bool,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -166,6 +167,7 @@ impl Default for Document {
             ime: false,
             zoom_until: 0.,
             aliases: vec![],
+            first_tab_changed: false,
         }
     }
 }
@@ -206,6 +208,7 @@ impl Document {
             return;
         }
         self.trash.push(self.tabs.remove(index));
+        self.first_tab_changed |= index == 0;
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new("본문".into()));
         }
@@ -238,9 +241,8 @@ impl Document {
     }
 }
 
-/// Render an editor. `legacy_body` remains the authoritative text of the first tab.
-/// `requested_selection` consumes a character range and focuses `requested_tab`
-/// (the first tab when no tab was specified).
+/// Render an inline editor with its footer anchored to the bottom of its available panel.
+/// The text widget id is shared with `content`; rendering order does not replace drafts.
 pub fn show(
     ui: &mut egui::Ui,
     legacy_body: &mut String,
@@ -248,10 +250,69 @@ pub fn show(
     id: impl Hash,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
+    let top = ui.cursor().min;
+    let bottom = ui.clip_rect().bottom().min(ui.ctx().screen_rect().bottom());
+    let width = ui.available_width().min(ui.clip_rect().width()).max(32.);
+    let height = ui
+        .available_height()
+        .min((bottom - top.y).max(120.))
+        .max(120.);
+    let (bounds, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    let mut footer_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt((id, "footer_region"))
+            .max_rect(bounds)
+            .layout(egui::Layout::bottom_up(egui::Align::Min)),
+    );
+    render_footer(&mut footer_ui, doc, id, 0., true);
+    let content_bottom =
+        (footer_ui.min_rect().top() - ui.spacing().item_spacing.y).max(bounds.top());
+    let content_rect =
+        egui::Rect::from_min_max(bounds.min, egui::pos2(bounds.right(), content_bottom));
+    let mut content_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt((id, "content_region"))
+            .max_rect(content_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    content_impl(&mut content_ui, legacy_body, doc, id)
+}
+/// Render only editable content inside the parent's finite available area.
+/// Use `footer` in the parent's bottom panel to keep all controls outside scrolling content.
+pub fn content(
+    ui: &mut egui::Ui,
+    legacy_body: &mut String,
+    doc: &mut Document,
+    id: impl Hash,
+) -> egui::Response {
+    let id = ui.make_persistent_id(id);
+    content_impl(ui, legacy_body, doc, id)
+}
+/// Render tabs, a divider, then the existing icon tools. `trailing_space` reserves
+/// the right end of the icon row for the parent's related-note control.
+pub fn footer(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    id: impl Hash,
+    trailing_space: f32,
+) -> egui::Response {
+    let id = ui.make_persistent_id(id);
+    render_footer(ui, doc, id, trailing_space, false)
+}
+fn content_impl(
+    ui: &mut egui::Ui,
+    legacy_body: &mut String,
+    doc: &mut Document,
+    id: Id,
+) -> egui::Response {
     if doc.tabs.is_empty() {
         doc.tabs.push(Tab::new("본문".into()));
     }
     doc.active = doc.active.min(doc.tabs.len() - 1);
+    if doc.first_tab_changed {
+        *legacy_body = doc.tabs[0].body.clone();
+        doc.first_tab_changed = false;
+    }
     if doc.tabs[0].body != *legacy_body {
         let tab = &mut doc.tabs[0];
         transform_spans(&tab.body, legacy_body, &mut tab.spans, &Format::default());
@@ -409,23 +470,16 @@ pub fn show(
         job.wrap.max_width = width;
         ui.fonts(|f| f.layout_job(job))
     };
-    // The parent may itself be a ScrollArea, where available_height is infinite.
-    // Bound the text pane to this native viewport so tabs and tools stay reachable.
     let bottom = ui.ctx().screen_rect().bottom().min(ui.clip_rect().bottom());
-    let on_screen = (bottom - ui.cursor().top() - 10.).max(60.);
-    let available = ui.available_height().min(on_screen);
-    let toolbar_width = ui.available_width().min(ui.clip_rect().width());
-    let reserved = if doc.toolbar_visible {
-        toolbar_height(toolbar_width) + 76.
-    } else {
-        38.
-    } + if doc.rename.is_some() { 36. } else { 0. }
-        + if doc.status.is_empty() { 0. } else { 22. };
-    let body_height = (available - reserved).max(44.);
-    let rows = (body_height / (doc.font_size * doc.zoom * 1.4)).clamp(2., 18.) as usize;
+    let body_height = ui
+        .available_height()
+        .min((bottom - ui.cursor().top()).max(1.))
+        .max(1.);
+    let rows = (body_height / (doc.font_size * doc.zoom * 1.4)).clamp(1., 18.) as usize;
     let mut output = egui::ScrollArea::vertical()
         .id_salt(id.with(("text_scroll", doc.active)))
         .max_height(body_height)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             let text = &mut doc.tabs[doc.active].body;
             let output = egui::TextEdit::multiline(text)
@@ -564,19 +618,6 @@ pub fn show(
                 Err(e) => doc.status = e,
             }
         }
-    }
-    if doc.toolbar_visible {
-        ui.add_space(6.);
-        ui.separator();
-        toolbar(ui, doc, id);
-    }
-    tabs(ui, doc, id);
-    if !doc.status.is_empty() {
-        ui.label(
-            RichText::new(&doc.status)
-                .small()
-                .color(Color32::from_rgb(155, 75, 45)),
-        );
     }
     if ui.input(|i| i.time) < doc.zoom_until {
         let rect = response.rect;
@@ -840,6 +881,56 @@ fn layout(
     }
     job
 }
+fn render_footer(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    id: Id,
+    trailing_space: f32,
+    bottom_up: bool,
+) -> egui::Response {
+    if doc.tabs.is_empty() {
+        doc.tabs.push(Tab::new("본문".into()));
+    }
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.;
+        let status = |ui: &mut egui::Ui, doc: &Document| {
+            if !doc.status.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&doc.status)
+                            .small()
+                            .color(Color32::from_rgb(155, 75, 45)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&doc.status);
+            }
+        };
+        let tools = |ui: &mut egui::Ui, doc: &mut Document| {
+            ui.scope(|ui| {
+                ui.set_max_width((ui.available_width() - trailing_space.max(0.)).max(28.));
+                toolbar(ui, doc, id);
+            });
+        };
+        if bottom_up {
+            if doc.toolbar_visible {
+                tools(ui, doc);
+                ui.separator();
+            }
+            tabs(ui, doc, id);
+            status(ui, doc);
+        } else {
+            status(ui, doc);
+            tabs(ui, doc, id);
+            if doc.toolbar_visible {
+                ui.separator();
+                tools(ui, doc);
+            }
+        }
+    })
+    .response
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Tool {
     Font,
@@ -865,14 +956,15 @@ const TOOLS: [Tool; 10] = [
     Tool::Opacity,
     Tool::Zoom,
 ];
+#[cfg(test)]
 fn toolbar_height(width: f32) -> f32 {
-    let columns = (((width.max(28.) + 4.) / 32.).floor() as usize).clamp(1, TOOLS.len());
+    let columns = (((width.max(28.) + 2.) / 30.).floor() as usize).clamp(1, TOOLS.len());
     let rows = TOOLS.len().div_ceil(columns);
-    rows as f32 * 28. + rows.saturating_sub(1) as f32 * 4.
+    rows as f32 * 28. + rows.saturating_sub(1) as f32 * 2.
 }
 fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
     ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(4.);
+        ui.spacing_mut().item_spacing = Vec2::splat(2.);
         ui.spacing_mut().button_padding = Vec2::new(6., 4.);
         ui.set_max_width(ui.available_width().min(ui.clip_rect().width()).max(28.));
         ui.horizontal_wrapped(|ui| {
@@ -955,17 +1047,18 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
                                             }
                                         });
                                         ui.separator();
-                                        let mut pt = doc.font_size * 0.75;
+                                        let mut pt = (doc.font_size * 0.75).round();
                                         if ui
                                             .add(
                                                 egui::DragValue::new(&mut pt)
                                                     .range(6.0..=48.0)
-                                                    .speed(0.5)
+                                                    .speed(1.)
+                                                    .fixed_decimals(0)
                                                     .suffix(" pt"),
                                             )
                                             .changed()
                                         {
-                                            doc.font_size = pt / 0.75;
+                                            doc.font_size = pt.round() / 0.75;
                                         }
                                     }
                                     Tool::Table => {
@@ -1283,17 +1376,28 @@ fn tabs(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
     }
     if let Some(i) = doc.rename {
         if i < doc.tabs.len() {
-            ui.horizontal(|ui| {
-                ui.label("탭 이름");
-                ui.add(
-                    egui::TextEdit::singleline(&mut doc.tabs[i].title)
-                        .id(id.with("rename"))
-                        .desired_width(130.),
-                );
-                if ui.button("확인").clicked() {
-                    doc.rename = None;
-                }
-            });
+            let mut open = true;
+            egui::Window::new("탭 이름 바꾸기")
+                .id(id.with("rename_popup"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("탭 이름");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut doc.tabs[i].title)
+                                .id(id.with("rename"))
+                                .desired_width(130.),
+                        );
+                        if ui.button("확인").clicked() {
+                            doc.rename = None;
+                        }
+                    });
+                });
+            if !open {
+                doc.rename = None;
+            }
         } else {
             doc.rename = None;
         }
@@ -2141,8 +2245,153 @@ mod tests {
             );
             assert_eq!(
                 toolbar_height(width - 28.),
-                if width == 360. { 28. } else { 60. }
+                if width == 360. { 28. } else { 58. }
             );
         }
+    }
+    #[test]
+    fn split_footer_stays_at_panel_bottom_without_consuming_body_scroll_height() {
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        let mut text = "본문\n".repeat(40);
+        let mut footer_rect = egui::Rect::NOTHING;
+        let mut body_rect = egui::Rect::NOTHING;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::splat(360.),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::TopBottomPanel::bottom("separate_footer")
+                    .default_height(80.)
+                    .frame(egui::Frame::NONE.inner_margin(8.))
+                    .show(ctx, |ui| {
+                        footer_rect = footer(ui, &mut doc, "split_memo", 32.).rect;
+                    });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    body_rect = ui.available_rect_before_wrap();
+                    content(ui, &mut text, &mut doc, "split_memo");
+                });
+            },
+        );
+        assert!(
+            footer_rect.bottom() >= 345. && footer_rect.bottom() <= 360.,
+            "footer {footer_rect:?}, body {body_rect:?}"
+        );
+        assert!(
+            footer_rect.height() < 100.,
+            "compact footer became taller than expected: {footer_rect:?}"
+        );
+        assert!(
+            body_rect.bottom() <= footer_rect.top(),
+            "body and pinned footer overlap"
+        );
+        assert_eq!(text.lines().count(), 40);
+    }
+    #[test]
+    fn footer_first_tab_delete_cannot_revive_legacy_content_in_separate_body() {
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        let mut legacy = "지워진 첫 본문".to_owned();
+        doc.tabs[0].body = legacy.clone();
+        doc.add_tab();
+        doc.tabs[1].body = "살아 있는 본문".into();
+        doc.delete_tab(0);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::TopBottomPanel::bottom("delete_footer").show(ctx, |ui| {
+                footer(ui, &mut doc, "delete_memo", 0.);
+            });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                content(ui, &mut legacy, &mut doc, "delete_memo");
+            });
+        });
+        assert_eq!(legacy, "살아 있는 본문");
+        assert_eq!(doc.tabs[0].body, "살아 있는 본문");
+        assert_eq!(doc.trash[0].body, "지워진 첫 본문");
+    }
+    #[test]
+    fn status_line_footer_keeps_tools_tabs_and_body_inside_active_and_passive_bounds() {
+        let mut errors = vec![];
+        for (active, width, base_height) in
+            [(true, 360., 92.), (true, 320., 122.), (false, 360., 48.)]
+        {
+            let ctx = egui::Context::default();
+            if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/malgun.ttf") {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "actual_windows_malgun".into(),
+                    egui::FontData::from_owned(bytes).into(),
+                );
+                fonts
+                    .families
+                    .get_mut(&FontFamily::Proportional)
+                    .unwrap()
+                    .insert(0, "actual_windows_malgun".into());
+                ctx.set_fonts(fonts);
+            }
+            ctx.style_mut(|s| {
+                s.spacing.item_spacing = Vec2::splat(8.);
+                s.spacing.button_padding = Vec2::new(9., 6.);
+                s.text_styles
+                    .insert(egui::TextStyle::Button, FontId::proportional(15.));
+                s.text_styles
+                    .insert(egui::TextStyle::Small, FontId::proportional(12.));
+            });
+            let mut doc = Document {
+                toolbar_visible: active,
+                status: "이미지 처리 안내가 긴 한 줄로 표시됩니다".into(),
+                ..Default::default()
+            };
+            let mut legacy = "원본 본문\n".repeat(30);
+            let original = legacy.clone();
+            let mut bounds = egui::Rect::NOTHING;
+            let mut footer_rect = egui::Rect::NOTHING;
+            let mut body = egui::Rect::NOTHING;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(width, 360.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let small_font = egui::TextStyle::Small.resolve(&ctx.style());
+                    let status_height = ctx.fonts(|f| f.row_height(&small_font)) + 4.;
+                    egui::TopBottomPanel::bottom("status_footer")
+                        .exact_height(base_height + status_height)
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 6)))
+                        .show(ctx, |ui| {
+                            bounds = ui.max_rect().intersect(ui.clip_rect());
+                            footer_rect = footer(
+                                ui,
+                                &mut doc,
+                                "status_document",
+                                if active { 32. } else { 0. },
+                            )
+                            .rect;
+                        });
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        body = ui.available_rect_before_wrap();
+                        content(ui, &mut legacy, &mut doc, "status_document");
+                    });
+                },
+            );
+            if !bounds.expand(0.5).contains_rect(footer_rect) {
+                errors.push(format!(
+                    "active={active} width={width}: footer={footer_rect:?}, bounds={bounds:?}"
+                ));
+            }
+            if body.bottom() > footer_rect.top() {
+                errors.push(format!(
+                    "active={active} width={width}: body overlaps footer"
+                ));
+            }
+            assert_eq!(legacy, original);
+        }
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
     }
 }

@@ -25,6 +25,11 @@ pub enum Icon {
     Alarm,
     Palette,
     Lock,
+    Maximize,
+    Restore,
+    Star,
+    Opacity,
+    Menu,
 }
 
 /// An icon-only control with a consistent hit area, keyboard focus and a spoken label.
@@ -64,6 +69,47 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
         .on_hover_text(tooltip)
 }
 
+pub fn text_button(ui: &mut Ui, icon: Icon, label: &str, tooltip: &str) -> Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.into(), font, ui.visuals().text_color());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(galley.size().x + 43., 30.), Sense::click());
+    let fill = if response.hovered() {
+        ui.visuals().widgets.hovered.weak_bg_fill
+    } else {
+        ui.visuals().widgets.inactive.weak_bg_fill
+    };
+    ui.painter().rect_filled(rect, 6., fill);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            6.,
+            Stroke::new(1.0_f32, ui.visuals().selection.stroke.color),
+            StrokeKind::Inside,
+        );
+    }
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(rect.left() + 16., rect.center().y),
+            Vec2::splat(17.),
+        ),
+        icon,
+        ui.visuals().weak_text_color(),
+    );
+    ui.painter().galley(
+        Pos2::new(rect.left() + 31., rect.center().y - galley.size().y / 2.),
+        galley,
+        ui.visuals().text_color(),
+    );
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+    response
+        .on_hover_text(tooltip)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
 /// Draw an icon into any rectangle. Geometry uses a 24 by 24 design grid.
 pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let scale = rect.width().min(rect.height()) / 24.0;
@@ -88,6 +134,36 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
         );
     };
     match icon {
+        Icon::Maximize => box_outline((4., 4.), (20., 20.), 1.5),
+        Icon::Restore => {
+            box_outline((4., 8.), (16., 20.), 1.);
+            path(&[(8., 8.), (8., 4.), (20., 4.), (20., 16.), (16., 16.)]);
+        }
+        Icon::Star => path(&[
+            (12., 3.),
+            (14.8, 8.7),
+            (21., 9.5),
+            (16.5, 14.),
+            (17.7, 20.5),
+            (12., 17.4),
+            (6.3, 20.5),
+            (7.5, 14.),
+            (3., 9.5),
+            (9.2, 8.7),
+            (12., 3.),
+        ]),
+        Icon::Opacity => {
+            painter.circle_stroke(p(12., 12.), 9. * scale, stroke);
+            path(&[(12., 3.), (12., 21.)]);
+            for x in [14., 16., 18.] {
+                line((x, 6. + (x - 14.) * 0.8), (x, 18. - (x - 14.) * 0.8));
+            }
+        }
+        Icon::Menu => {
+            line((4., 6.), (20., 6.));
+            line((4., 12.), (20., 12.));
+            line((4., 18.), (20., 18.));
+        }
         Icon::Alarm => {
             painter.circle_stroke(p(12., 13.), 7. * scale, stroke);
             line((12., 8.), (12., 13.));

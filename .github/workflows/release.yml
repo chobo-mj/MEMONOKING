@@ -1,0 +1,236 @@
+name: Windows UI preview release
+
+on:
+  push:
+    tags:
+      - 'v*-ui-preview*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing UI preview tag, e.g. v0.2.0-ui-preview'
+        required: true
+        default: v0.2.0-ui-preview
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-preview-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      # The MSVC runtime is linked into the executable. No runtime installer
+      # or download is required on the offline destination computer.
+      RUSTFLAGS: '-C target-feature=+crt-static'
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Validate release tag and Cargo version
+        id: version
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $releaseTag = $env:REQUESTED_TAG
+          if ($releaseTag -notmatch '^v(\d+\.\d+\.\d+)-ui-preview(?:\.\d+)?$') {
+            throw 'Only vMAJOR.MINOR.PATCH-ui-preview[.N] tags can be published here.'
+          }
+          $tagVersion = $Matches[1]
+          git show-ref --verify --quiet "refs/tags/$releaseTag"
+          if ($LASTEXITCODE -ne 0) { throw 'The release tag must already exist.' }
+          $tagCommit = git rev-parse "$releaseTag^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the release tag.' }
+          $sourceCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $sourceCommit -ne $tagCommit) { throw 'The checkout does not match the tagged commit.' }
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
+          $package = @($metadata.packages | Where-Object name -eq 'memonoking')
+          if ($package.Count -ne 1 -or $package[0].version -ne $tagVersion) {
+            throw "Cargo version must match tag version $tagVersion."
+          }
+          "RELEASE_TAG=$releaseTag" >> $env:GITHUB_ENV
+          "RELEASE_LABEL=$($releaseTag.Substring(1))" >> $env:GITHUB_ENV
+          "APP_VERSION=$tagVersion" >> $env:GITHUB_ENV
+          "SOURCE_COMMIT=$sourceCommit" >> $env:GITHUB_ENV
+
+      - name: Check, test, and build static-CRT executable
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo fmt --all --check
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed.' }
+          cargo clippy --locked --target $env:TARGET --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Clippy failed.' }
+          cargo test --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+          cargo build --release --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+
+      - name: Check offline executable dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $executable = Join-Path $PWD "target/$env:TARGET/release/memonoking.exe"
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $dumpbins = @(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe')
+          if ($LASTEXITCODE -ne 0 -or $dumpbins.Count -eq 0) { throw 'Cannot locate dumpbin to verify offline runtime dependencies.' }
+          $dependencies = & $dumpbins[-1] /DEPENDENTS $executable
+          if ($LASTEXITCODE -ne 0) { throw 'Executable dependency inspection failed.' }
+          $dependencies | Write-Output
+          if (($dependencies -join "`n") -match '(?im)^\s*(?:(?:VCRUNTIME|MSVCP|CONCRT|MSVCR)[A-Za-z0-9_]*|ucrtbased?|api-ms-win-crt-[A-Za-z0-9-]+)\.dll\s*$') {
+            throw 'Dynamic Visual C++ runtime detected; do not publish an offline-incomplete package.'
+          }
+
+      - name: Stage allowlisted portable package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $PWD 'dist/portable/MEMONOKING'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -LiteralPath "target/$env:TARGET/release/memonoking.exe" -Destination (Join-Path $stage 'MEMONOKING.exe')
+          $readme = (Get-Content -LiteralPath 'packaging/README.md' -Raw -Encoding utf8).Split('## 개발자용 패키징')[0].TrimEnd()
+          $readme.Replace('0.2.0-ui-preview', $env:RELEASE_LABEL) | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
+          $hashes = @('MEMONOKING.exe', 'README.txt') | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage $_)).Hash.ToLowerInvariant()
+            "$hash  $_"
+          }
+          $hashes | Set-Content -LiteralPath (Join-Path $stage 'SHA256SUMS.txt') -Encoding ascii
+          $allowed = @('MEMONOKING.exe', 'README.txt', 'SHA256SUMS.txt')
+          $actual = @(Get-ChildItem -LiteralPath $stage -File | Select-Object -ExpandProperty Name)
+          if (@(Compare-Object $allowed $actual).Count -ne 0 -or @(Get-ChildItem -LiteralPath $stage -Directory).Count -ne 0) {
+            throw 'Portable package contains an unexpected file or directory.'
+          }
+          $zip = Join-Path $PWD "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Portable.zip"
+          Compress-Archive -LiteralPath $stage -DestinationPath $zip -CompressionLevel Optimal
+
+      - name: Locate or install Inno Setup compiler
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Find-InnoCompiler {
+            $candidates = @(
+              (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'),
+              (Join-Path $env:ProgramFiles 'Inno Setup 6/ISCC.exe')
+            )
+            $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($onPath) { $candidates += $onPath.Source }
+            return $candidates | Where-Object {
+              if (-not (Test-Path -LiteralPath $_)) { return $false }
+              $version = (Get-Item -LiteralPath $_).VersionInfo
+              return $version.FileMajorPart -gt 6 -or ($version.FileMajorPart -eq 6 -and $version.FileMinorPart -ge 3)
+            } | Select-Object -First 1
+          }
+          $compiler = Find-InnoCompiler
+          if (-not $compiler) {
+            choco upgrade innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+            $compiler = Find-InnoCompiler
+          }
+          if (-not $compiler) { throw 'ISCC.exe was not found.' }
+          "ISCC_PATH=$compiler" >> $env:GITHUB_ENV
+
+      - name: Build per-user offline installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $PWD 'dist/portable/MEMONOKING'
+          $output = Join-Path $PWD 'dist'
+          & $env:ISCC_PATH "/DAppVersion=$env:APP_VERSION" "/DReleaseLabel=$env:RELEASE_LABEL" "/DStageDir=$stage" "/DPackageOutputDir=$output" 'packaging/MEMONOKING.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+
+      - name: Smoke-test installation, shortcuts, payload, and removal
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $PWD "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Setup.exe"
+          $appDir = Join-Path $env:LOCALAPPDATA 'Programs/MEMONOKING'
+          $install = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -WindowStyle Hidden -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer smoke test failed: $($install.ExitCode)." }
+          foreach ($file in @('MEMONOKING.exe', 'README.txt', 'SHA256SUMS.txt', 'unins000.exe')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $appDir $file))) { throw "Installed file is missing: $file" }
+          }
+          $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appDir 'MEMONOKING.exe')).Hash
+          $stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/portable/MEMONOKING/MEMONOKING.exe').Hash
+          if ($installedHash -ne $stagedHash) { throw 'Installed executable differs from the staged executable.' }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'MEMONOKING/MEMONOKING.lnk'
+          if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Start menu shortcut is missing.' }
+          $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'MEMONOKING.lnk'
+          if (Test-Path -LiteralPath $desktopShortcut) { throw 'The optional desktop shortcut must be off by default.' }
+          $remove = Start-Process -FilePath (Join-Path $appDir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
+          if ($remove.ExitCode -ne 0) { throw "Uninstall smoke test failed: $($remove.ExitCode)." }
+          for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath (Join-Path $appDir 'MEMONOKING.exe')); $attempt++) { Start-Sleep -Milliseconds 250 }
+          if (Test-Path -LiteralPath (Join-Path $appDir 'MEMONOKING.exe')) { throw 'Uninstall left the executable behind.' }
+          if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall left the Start menu shortcut behind.' }
+
+      - name: Write release checksums and notes
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(
+            "MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Setup.exe",
+            "MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Portable.zip"
+          )
+          $hashes = $assets | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path 'dist' $_)).Hash.ToLowerInvariant()
+            "$hash  $_"
+          }
+          $hashes | Set-Content -LiteralPath 'dist/SHA256SUMS.txt' -Encoding ascii
+          @"
+          # MEMONOKING $env:RELEASE_LABEL
+
+          Windows 10/11 x64 화면·조작 시험용 사전 배포입니다.
+
+          - Setup.exe: 관리자 권한 없이 현재 사용자에게 설치, 시작 메뉴 바로가기와 제거 지원.
+          - Portable.zip: 압축을 푼 뒤 MEMONOKING.exe 실행. Rust나 빌드 도구 설치 불필요.
+          - SHA256SUMS.txt: 설치파일과 ZIP의 SHA-256 대조용.
+          - 실행에는 인터넷이나 별도 Visual C++ 런타임 다운로드가 필요하지 않습니다.
+
+          **종료하면 메모와 설정이 초기화됩니다. 실제 업무 자료 저장용이 아닙니다.**
+          잠금은 UI 시뮬레이션이며 암호화 보안을 제공하지 않습니다. 저장·백업·복원·Windows 알림/트레이/자동실행은 후속입니다. 보호된 PDF/PPT/Excel 잠금을 우회하지 않습니다.
+
+          이 배포는 서명되지 않았습니다. 사내 실행·반입 정책을 따라 시험하세요.
+          빌드 원본: $env:SOURCE_COMMIT
+          "@ | Set-Content -LiteralPath 'dist/RELEASE_NOTES.md' -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MEMONOKING-${{ env.RELEASE_LABEL }}-Windows-x64
+          if-no-files-found: error
+          path: |
+            dist/*-Setup.exe
+            dist/*-Portable.zip
+            dist/SHA256SUMS.txt
+
+      - name: Publish UI preview prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(
+            "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Setup.exe",
+            "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Portable.zip",
+            'dist/SHA256SUMS.txt'
+          )
+          $existingJson = gh release view $env:RELEASE_TAG --json isPrerelease
+          if ($LASTEXITCODE -eq 0) {
+            $existing = $existingJson | ConvertFrom-Json
+            if (-not $existing.isPrerelease) { throw 'Refusing to overwrite a non-prerelease release.' }
+            gh release upload $env:RELEASE_TAG @assets --clobber
+          } else {
+            gh release create $env:RELEASE_TAG @assets --verify-tag --prerelease --latest=false --title "MEMONOKING $env:RELEASE_LABEL" --notes-file 'dist/RELEASE_NOTES.md'
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publication failed.' }

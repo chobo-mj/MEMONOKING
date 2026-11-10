@@ -8,6 +8,7 @@ mod extras;
 mod icons;
 mod media;
 mod model;
+mod native_window;
 mod refinements;
 mod studio;
 mod views;
@@ -29,7 +30,7 @@ const PALETTE: [Color32; 10] = [
 ];
 const NO_PROJECT: usize = usize::MAX;
 const INK: Color32 = Color32::from_rgb(48, 47, 44);
-const MUTED: Color32 = Color32::from_rgb(133, 130, 124);
+const MUTED: Color32 = Color32::from_rgb(113, 114, 116);
 const ACCENT: Color32 = Color32::from_rgb(184, 72, 53);
 #[derive(Clone)]
 struct NoteDrag;
@@ -192,6 +193,15 @@ impl App {
         v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
         v.widgets.active.weak_bg_fill = v.selection.bg_fill;
         v.window_fill = v.panel_fill;
+        v.window_corner_radius = egui::CornerRadius::same(10);
+        v.window_stroke = egui::Stroke::new(
+            1.0_f32,
+            if self.dark {
+                Color32::from_gray(65)
+            } else {
+                Color32::from_rgb(224, 225, 227)
+            },
+        );
         v.widgets.inactive.weak_bg_fill = if self.dark {
             Color32::from_rgb(42, 43, 41)
         } else {
@@ -714,8 +724,8 @@ fn main() -> eframe::Result {
         "MEMONOKING",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1180., 760.])
-                .with_min_inner_size([960., 640.]),
+                .with_inner_size([1440., 900.])
+                .with_min_inner_size([1100., 720.]),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
