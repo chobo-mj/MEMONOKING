@@ -4,7 +4,7 @@
   #define AppVersion "0.2.0"
 #endif
 #ifndef ReleaseLabel
-  #define ReleaseLabel "0.2.0-ui-preview.1"
+  #define ReleaseLabel "0.2.0-ui-preview.2"
 #endif
 #ifndef StageDir
   #define StageDir "..\dist\portable\MEMONOKING"

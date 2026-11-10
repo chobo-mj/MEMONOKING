@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing UI preview tag, e.g. v0.2.0-ui-preview.1'
+        description: 'Existing UI preview tag, e.g. v0.2.0-ui-preview.2'
         required: true
-        default: v0.2.0-ui-preview.1
+        default: v0.2.0-ui-preview.2
 
 permissions:
   contents: read
@@ -106,7 +106,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -LiteralPath "target/$env:TARGET/release/memonoking.exe" -Destination (Join-Path $stage 'MEMONOKING.exe')
           $readme = (Get-Content -LiteralPath 'packaging/README.md' -Raw -Encoding utf8).Split('## 개발자용 패키징')[0].TrimEnd()
-          $readme.Replace('0.2.0-ui-preview.1', $env:RELEASE_LABEL) | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
+          $readme.Replace('0.2.0-ui-preview.2', $env:RELEASE_LABEL) | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
           $hashes = @('MEMONOKING.exe', 'README.txt') | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage $_)).Hash.ToLowerInvariant()
             "$hash  $_"
@@ -145,12 +145,7 @@ jobs:
             }
           }
           function Get-InnoEngineVersion([string] $Path) {
-            $help = Invoke-InnoCommand -Path $Path -Arguments @('/?')
-            if ($help.ExitCode -ne 0 -or $help.Output -notmatch '(?im)^Inno Setup \d+(?:\.\d+)*(?: \(32-bit\))? Command-Line Compiler\s*$') {
-              Write-Host "Rejected non-ISCC or unusable compiler: $Path"
-              return $null
-            }
-            # Inno 6's /? banner identifies only its major version. Its EXE
+            # Do not depend on help exit codes or formatting. The EXE
             # version resource can be 0.0.0.0. A no-output stdin compile reports
             # the loaded engine's real version, without creating an installer.
             # Official source: jrsoftware/issrc, is-6_7_1/Projects/ISCC.dpr,
