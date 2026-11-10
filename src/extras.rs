@@ -22,7 +22,7 @@ impl Picker {
             owner: if target == 0 || target == 8 || target == 9 {
                 egui::ViewportId::from_hash_of("note_editor")
             } else {
-                egui::ViewportId::ROOT
+                main_viewport()
             },
             target,
             bound_note: None,
@@ -120,7 +120,7 @@ impl Default for Extra {
             edit_occurrence: None,
             missing_image: None,
             journal_open: HashMap::new(),
-            scope_owner: egui::ViewportId::ROOT,
+            scope_owner: main_viewport(),
             journal_all: false,
             picker: None,
             search_options: false,
@@ -243,17 +243,18 @@ impl App {
     }
     pub fn note_options(&mut self, ui: &mut egui::Ui, i: usize) {
         let color = self.data.notes[i].color;
-        let response = ui
-            .menu_button("    ", |ui| {
-                crate::desktop::color_choices(ui, &mut self.data.notes[i].color)
-            })
-            .response;
-        ui.painter()
-            .rect_filled(response.rect.shrink(4.), 4., color);
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "메모 색상 선택")
+        let r = crate::ui::icon_menu(ui, crate::icons::Icon::Palette, "메모 색상", |ui| {
+            crate::desktop::color_choices(ui, &mut self.data.notes[i].color)
         });
-        response.on_hover_text("메모 색상");
+        // Paint the current color over the icon, as a swatch.
+        let swatch = egui::Rect::from_center_size(r.rect.center(), Vec2::splat(18.));
+        ui.painter().rect_filled(swatch, 5., color);
+        ui.painter().rect_stroke(
+            swatch,
+            5.,
+            egui::Stroke::new(1.0_f32, Color32::from_black_alpha(35)),
+            egui::StrokeKind::Inside,
+        );
     }
     pub fn detached_note(&mut self, ctx: &egui::Context) {
         self.render_note_windows(ctx);
@@ -264,10 +265,15 @@ impl App {
         let time = self.data.notes[i].time;
         let end = start.map(|d| d + Duration::days(self.data.notes[i].duration.max(1) as i64 - 1));
         let end_time = self.data.notes[i].end_time.unwrap_or(time);
-        ui.horizontal_wrapped(|ui| {
+        let created = format!(
+            "{} 생성",
+            self.data.notes[i].created.format("%Y.%m.%d %H:%M")
+        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.;
             let label = start
-                .map(|d| format!("시작  {} {}", d.format("%m.%d"), time.format("%H:%M")))
-                .unwrap_or_else(|| "시작일 선택".into());
+                .map(|d| format!("{} {}", d.format("%m.%d"), time.format("%H:%M")))
+                .unwrap_or_else(|| "일정 시작".into());
             if crate::icons::text_button(
                 ui,
                 crate::icons::Icon::Calendar,
@@ -281,9 +287,10 @@ impl App {
                 p.bound_note = Some((i, self.extra.edit_occurrence));
                 self.extra.picker = Some(p);
             }
+            ui.label(RichText::new("→").color(crate::ui::t(ui).faint));
             let label = end
-                .map(|d| format!("종료  {} {}", d.format("%m.%d"), end_time.format("%H:%M")))
-                .unwrap_or_else(|| "종료일 선택".into());
+                .map(|d| format!("{} {}", d.format("%m.%d"), end_time.format("%H:%M")))
+                .unwrap_or_else(|| "일정 완료".into());
             if crate::icons::text_button(
                 ui,
                 crate::icons::Icon::Calendar,
@@ -297,20 +304,32 @@ impl App {
                 p.bound_note = Some((i, self.extra.edit_occurrence));
                 self.extra.picker = Some(p);
             }
-            ui.checkbox(&mut self.data.notes[i].recurring, "정기 일정")
-                .on_hover_text("정기 일정 표시 · 반복 엔진은 후속 연결");
-            ui.checkbox(&mut self.data.notes[i].wiki, "위키");
+            ui.add_space(4.);
+            let n = &mut self.data.notes[i];
+            if crate::ui::pill(ui, n.recurring, "정기 일정")
+                .on_hover_text("정기 일정 표시 · 반복 엔진은 후속 연결")
+                .clicked()
+            {
+                n.recurring = !n.recurring;
+            }
+            if crate::ui::pill(ui, n.wiki, "위키").clicked() {
+                n.wiki = !n.wiki;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::ui::hint(ui, &created);
+            });
         });
-        ui.add_space(5.);
-        ui.horizontal_wrapped(|ui| {
+        ui.add_space(4.);
+        ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("memo_project", i))
-                .width(160.)
-                .selected_text(
+                .width(170.)
+                .selected_text(format!(
+                    "# {}",
                     self.data.notes[i]
                         .project
                         .map(|p| self.data.projects[p].as_str())
-                        .unwrap_or("프로젝트 없음"),
-                )
+                        .unwrap_or("프로젝트 없음")
+                ))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.data.notes[i].project, None, "프로젝트 없음");
                     for (p, name) in self.data.projects.iter().enumerate() {
@@ -321,26 +340,30 @@ impl App {
                         }
                     }
                 });
-            ui.label(
-                RichText::new(format!(
-                    "{} 생성",
-                    self.data.notes[i].created.format("%Y.%m.%d %H:%M")
-                ))
-                .size(11.)
-                .color(MUTED),
-            );
-            if let Some(t) = self.editor_completion() {
-                if ui
-                    .small_button(format!("완료 시간 : {}", t.format("%m.%d %H:%M")))
-                    .on_hover_text("완료 기록 날짜와 시간 수정")
-                    .clicked()
-                {
-                    let mut p = Picker::new(8, t.date(), t.time());
-                    p.owner = ui.ctx().viewport_id();
-                    p.bound_note = Some((i, self.extra.edit_occurrence));
-                    self.extra.picker = Some(p);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(t) = self.editor_completion() {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(format!(
+                                    "완료 시간 : {}",
+                                    t.format("%Y.%m.%d %H:%M")
+                                ))
+                                .small()
+                                .color(ACCENT),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("완료 기록 날짜와 시간 수정")
+                        .clicked()
+                    {
+                        let mut p = Picker::new(8, t.date(), t.time());
+                        p.owner = ui.ctx().viewport_id();
+                        p.bound_note = Some((i, self.extra.edit_occurrence));
+                        self.extra.picker = Some(p);
+                    }
                 }
-            }
+            });
         });
     }
     pub fn picker_window(&mut self, ctx: &egui::Context) {
@@ -361,65 +384,42 @@ impl App {
         }
         let mut open = true;
         let mut applied = false;
-        egui::Window::new("날짜와 시간 선택")
-            .id(egui::Id::new("date_picker"))
-            .open(&mut open)
-            .default_width(300.)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("〈").clicked() {
-                        p.month = (p.month - Duration::days(1)).with_day(1).unwrap();
+        let title = match p.target {
+            0 => "일정 시작",
+            9 => "일정 종료",
+            8 => "완료 시간",
+            _ => "날짜 선택",
+        };
+        let with_time = matches!(p.target, 0 | 8 | 9);
+        crate::ui::dialog(
+            ctx,
+            ("date_picker", p.target),
+            title,
+            [300., if with_time { 410. } else { 370. }],
+            true,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new(title).strong().size(15.));
+                ui.add_space(6.);
+                let mut day = p.date;
+                crate::ui::month_grid(ui, &mut p.month, &mut day);
+                p.date = day;
+                if with_time {
+                    ui.add_space(4.);
+                    crate::ui::time_row(ui, &mut p.hour, &mut p.minute);
+                }
+                ui.add_space(6.);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::ui::primary(ui, "적용").clicked() {
+                        applied = true;
                     }
-                    ui.strong(p.month.format("%Y년 %m월").to_string());
-                    if ui.button("〉").clicked() {
-                        p.month = (p.month + Duration::days(32)).with_day(1).unwrap();
-                    }
-                });
-                egui::Grid::new("picker_days")
-                    .spacing([4., 4.])
-                    .show(ui, |ui| {
-                        for s in ["일", "월", "화", "수", "목", "금", "토"] {
-                            ui.label(s);
-                        }
-                        ui.end_row();
-                        let offset = p.month.weekday().num_days_from_sunday() as i64;
-                        for slot in 0..42 {
-                            let d = p.month + Duration::days(slot - offset);
-                            if d.month() == p.month.month() {
-                                if ui
-                                    .add_sized(
-                                        [30., 27.],
-                                        egui::Button::new(d.day().to_string())
-                                            .selected(p.date == d),
-                                    )
-                                    .clicked()
-                                {
-                                    p.date = d;
-                                }
-                            } else {
-                                ui.label("");
-                            }
-                            if slot % 7 == 6 {
-                                ui.end_row();
-                            }
-                        }
-                    });
-                ui.horizontal(|ui| {
-                    ui.label("시간");
-                    ui.add(egui::DragValue::new(&mut p.hour).range(0..=23));
-                    ui.label(":");
-                    ui.add(egui::DragValue::new(&mut p.minute).range(0..=59));
-                });
-                ui.horizontal(|ui| {
                     if ui.button("오늘").clicked() {
                         p.date = Local::now().date_naive();
                         p.month = p.date.with_day(1).unwrap();
                     }
-                    if ui.button("선택 적용").clicked() {
-                        applied = true;
-                    }
                 });
-            });
+            },
+        );
         if applied {
             match p.target {
                 0 => {
@@ -715,13 +715,30 @@ impl App {
     }
     fn project_window(&mut self, ctx: &egui::Context) {
         let mut open = self.extra.project_manager;
-        egui::Window::new("프로젝트 관리")
-            .open(&mut open)
-            .default_width(520.)
-            .show(ctx, |ui| {
+        crate::ui::dialog(
+            ctx,
+            "project_manager",
+            "프로젝트 관리",
+            [460., 420.],
+            false,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new("프로젝트").strong().size(15.));
+                crate::ui::hint(
+                    ui,
+                    "메모 본문 첫 줄에 #이름 + 스페이스로도 만들 수 있습니다",
+                );
+                ui.add_space(8.);
                 ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.project_name);
-                    if ui.button("프로젝트 추가").clicked() && !self.project_name.trim().is_empty()
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.project_name)
+                            .desired_width(ui.available_width() - 70.)
+                            .margin(egui::Margin::symmetric(10, 6))
+                            .hint_text("새 프로젝트 이름"),
+                    );
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (crate::ui::primary(ui, "추가").clicked() || enter)
+                        && !self.project_name.trim().is_empty()
                     {
                         let name = self.project_name.trim().to_owned();
                         if !self
@@ -733,54 +750,94 @@ impl App {
                         {
                             self.data.projects.push(name);
                         }
+                        self.project_name.clear();
                     }
                 });
-                for p in 0..self.data.projects.len() {
-                    if self.extra.deleted_projects.contains(&p) {
-                        continue;
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label(&self.data.projects[p]);
+                ui.add_space(10.);
+                crate::ui::divider(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for p in 0..self.data.projects.len() {
+                        if self.extra.deleted_projects.contains(&p) {
+                            continue;
+                        }
                         let hidden = self.extra.hidden_projects.contains(&p);
-                        if ui
-                            .button(if hidden {
-                                "다시 활성화"
+                        ui.horizontal(|ui| {
+                            ui.set_min_height(34.);
+                            let tone = crate::ui::t(ui);
+                            ui.label(RichText::new("#").color(tone.faint));
+                            ui.label(if hidden {
+                                RichText::new(&self.data.projects[p]).color(tone.faint)
                             } else {
-                                "관련 메모 함께 숨기기"
-                            })
-                            .clicked()
-                        {
+                                RichText::new(&self.data.projects[p])
+                            });
                             if hidden {
-                                self.extra.hidden_projects.remove(&p);
-                            } else {
-                                self.extra.hidden_projects.insert(p);
-                                if self.data.notes[self.active].project == Some(p) {
-                                    self.editor = false;
-                                    self.sticky = false;
-                                    self.extra.size_applied = None;
-                                }
-                                self.picked = self
-                                    .picked
-                                    .iter()
-                                    .copied()
-                                    .filter(|&i| self.visible(i))
-                                    .collect();
+                                crate::ui::chip(ui, "숨김", tone.field, tone.muted);
                             }
-                            self.project_filter = None;
-                        }
-                        if ui.button("삭제…").clicked() {
-                            self.extra.delete_project = Some(p);
-                            self.extra.delete_notes = false;
-                        }
-                    });
-                }
-            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if crate::icons::small_icon(
+                                        ui,
+                                        crate::icons::Icon::Trash,
+                                        "프로젝트 삭제",
+                                    )
+                                    .clicked()
+                                    {
+                                        self.extra.delete_project = Some(p);
+                                        self.extra.delete_notes = false;
+                                    }
+                                    if ui
+                                        .button(if hidden {
+                                            "다시 보이기"
+                                        } else {
+                                            "숨기기"
+                                        })
+                                        .on_hover_text("숨기면 관련 메모도 함께 숨겨집니다")
+                                        .clicked()
+                                    {
+                                        if hidden {
+                                            self.extra.hidden_projects.remove(&p);
+                                        } else {
+                                            self.extra.hidden_projects.insert(p);
+                                            if self.data.notes[self.active].project == Some(p) {
+                                                self.editor = false;
+                                                self.sticky = false;
+                                                self.extra.size_applied = None;
+                                            }
+                                            self.picked = self
+                                                .picked
+                                                .iter()
+                                                .copied()
+                                                .filter(|&i| self.visible(i))
+                                                .collect();
+                                        }
+                                        self.project_filter = None;
+                                    }
+                                },
+                            );
+                        });
+                        crate::ui::divider(ui);
+                    }
+                });
+            },
+        );
         self.extra.project_manager = open;
         if let Some(p) = self.extra.delete_project {
-            egui::Window::new("프로젝트 삭제 범위")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("{} 프로젝트", self.data.projects[p]));
+            let mut open = true;
+            crate::ui::dialog(
+                ctx,
+                "delete_project",
+                "프로젝트 삭제",
+                [380., 250.],
+                true,
+                &mut open,
+                |ui| {
+                    ui.label(
+                        RichText::new(format!("‘{}’ 프로젝트를 삭제합니다", self.data.projects[p]))
+                            .strong()
+                            .size(15.),
+                    );
+                    ui.add_space(8.);
                     ui.radio_value(
                         &mut self.extra.delete_notes,
                         false,
@@ -789,16 +846,21 @@ impl App {
                     ui.radio_value(
                         &mut self.extra.delete_notes,
                         true,
-                        "연관된 메모도 모두 삭제",
+                        "연관된 메모도 모두 휴지통으로",
                     );
-                    if ui.button("선택 범위 삭제").clicked() {
+                    let (ok, cancel) = crate::ui::dialog_buttons(ui, "삭제", "취소");
+                    if ok {
                         self.delete_project(p, self.extra.delete_notes);
                         self.extra.delete_project = None;
                     }
-                    if ui.button("취소").clicked() {
+                    if cancel {
                         self.extra.delete_project = None;
                     }
-                });
+                },
+            );
+            if !open {
+                self.extra.delete_project = None;
+            }
         }
     }
     pub fn delete_project(&mut self, p: usize, delete_notes: bool) {
@@ -822,44 +884,84 @@ impl App {
     }
     fn search_window(&mut self, ctx: &egui::Context) {
         let mut open = self.extra.search_options;
-        egui::Window::new("상세 검색")
-            .open(&mut open)
-            .default_width(560.)
-            .show(ctx, |ui| {
-                ui.label("제목과 본문을 함께 검색합니다. 선택한 조건은 모두 만족해야 합니다.");
-                ui.checkbox(&mut self.extra.search_created, "생성일 조건");
-                ui.horizontal(|ui| {
-                    self.date_filter_button(ui, 2, "시작", self.extra.created_from);
-                    self.date_filter_button(ui, 3, "끝", self.extra.created_to);
-                });
-                ui.checkbox(&mut self.extra.search_scheduled, "일정 조건");
-                ui.horizontal(|ui| {
-                    self.date_filter_button(ui, 4, "시작", self.extra.scheduled_from);
-                    self.date_filter_button(ui, 5, "끝", self.extra.scheduled_to);
-                });
-                egui::ComboBox::from_id_salt("search_project")
-                    .selected_text(crate::refinements::project_label(
-                        self.extra.search_project,
-                        &self.data.projects,
-                    ))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.extra.search_project, None, "모든 프로젝트");
-                        ui.selectable_value(
-                            &mut self.extra.search_project,
-                            Some(NO_PROJECT),
-                            "프로젝트 없음",
-                        );
-                        for (p, name) in self.data.projects.iter().enumerate() {
-                            if !self.extra.deleted_projects.contains(&p) {
-                                ui.selectable_value(&mut self.extra.search_project, Some(p), name);
-                            }
-                        }
+        crate::ui::dialog(
+            ctx,
+            "search_options",
+            "상세 검색",
+            [460., 470.],
+            false,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new("상세 검색").strong().size(15.));
+                crate::ui::hint(
+                    ui,
+                    "제목과 본문을 함께 검색합니다 · 선택한 조건을 모두 만족해야 합니다",
+                );
+                ui.add_space(8.);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::Margin::symmetric(10, 7))
+                        .hint_text("검색어"),
+                );
+                ui.add_space(8.);
+                crate::ui::toggle_row(ui, &mut self.extra.search_created, "생성일 범위", "");
+                if self.extra.search_created {
+                    ui.horizontal(|ui| {
+                        self.date_filter_button(ui, 2, "시작", self.extra.created_from);
+                        self.date_filter_button(ui, 3, "끝", self.extra.created_to);
                     });
-                ui.checkbox(&mut self.extra.image, "첨부 이미지 있음");
-                ui.checkbox(&mut self.extra.table, "첨부 표 있음");
-                ui.checkbox(&mut self.extra.link, "첨부 링크 있음");
-                ui.checkbox(&mut self.extra.include_hidden, "숨긴 프로젝트 포함");
-                ui.checkbox(&mut self.extra.created_basis, "생성시간 기준으로 정렬·표시");
+                }
+                crate::ui::toggle_row(ui, &mut self.extra.search_scheduled, "일정 범위", "");
+                if self.extra.search_scheduled {
+                    ui.horizontal(|ui| {
+                        self.date_filter_button(ui, 4, "시작", self.extra.scheduled_from);
+                        self.date_filter_button(ui, 5, "끝", self.extra.scheduled_to);
+                    });
+                }
+                crate::ui::field(ui, "프로젝트", |ui| {
+                    egui::ComboBox::from_id_salt("search_project")
+                        .width(180.)
+                        .selected_text(crate::refinements::project_label(
+                            self.extra.search_project,
+                            &self.data.projects,
+                        ))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.extra.search_project,
+                                None,
+                                "모든 프로젝트",
+                            );
+                            ui.selectable_value(
+                                &mut self.extra.search_project,
+                                Some(NO_PROJECT),
+                                "프로젝트 없음",
+                            );
+                            for (p, name) in self.data.projects.iter().enumerate() {
+                                if !self.extra.deleted_projects.contains(&p) {
+                                    ui.selectable_value(
+                                        &mut self.extra.search_project,
+                                        Some(p),
+                                        name,
+                                    );
+                                }
+                            }
+                        });
+                });
+                ui.add_space(6.);
+                ui.horizontal_wrapped(|ui| {
+                    for (value, label) in [
+                        (&mut self.extra.image, "이미지 있음"),
+                        (&mut self.extra.table, "표 있음"),
+                        (&mut self.extra.link, "링크 있음"),
+                        (&mut self.extra.include_hidden, "숨긴 프로젝트 포함"),
+                        (&mut self.extra.created_basis, "생성시간 기준 정렬"),
+                    ] {
+                        if crate::ui::pill(ui, *value, label).clicked() {
+                            *value = !*value;
+                        }
+                    }
+                });
                 let invalid = (self.extra.search_created
                     && self
                         .extra
@@ -875,44 +977,46 @@ impl App {
                 if invalid {
                     ui.colored_label(ACCENT, "시작 날짜가 끝 날짜보다 늦습니다");
                 }
-                if ui
-                    .add_enabled(!invalid, egui::Button::new("검색 적용"))
-                    .clicked()
-                {
-                    self.extra.search_mode = true;
-                    self.page = 0;
-                    self.project_filter = None;
-                    self.split = true;
-                }
-            });
+                ui.add_space(8.);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            !invalid,
+                            egui::Button::new(RichText::new("검색").color(Color32::WHITE).strong())
+                                .fill(ACCENT),
+                        )
+                        .clicked()
+                    {
+                        self.extra.search_mode = true;
+                        self.page = 0;
+                        self.project_filter = None;
+                        self.split = true;
+                    }
+                });
+            },
+        );
         self.extra.search_options = open;
     }
     pub fn extra_windows(&mut self, ctx: &egui::Context) {
-        self.scope_dialog(ctx);
         self.missing_image_dialog(ctx);
         self.project_window(ctx);
         self.search_window(ctx);
-        self.picker_window(ctx);
     }
 }
 impl App {
     pub fn utilities(&mut self, ui: &mut egui::Ui) {
-        ui.heading("편의기능");
-        ui.horizontal_wrapped(|ui| {
-            for (t, name) in [
+        ui::tabs(
+            ui,
+            &mut self.extra.utilities_tab,
+            &[
                 "업무일지",
                 "표 모아보기",
                 "이미지 모아보기",
                 "링크 · 즐겨찾기",
                 "휴지통",
-            ]
-            .iter()
-            .enumerate()
-            {
-                ui.selectable_value(&mut self.extra.utilities_tab, t, *name);
-            }
-        });
-        ui.separator();
+            ],
+        );
+        ui.add_space(12.);
         match self.extra.utilities_tab {
             0 => self.journal(ui),
             1 => self.content_tables(ui),

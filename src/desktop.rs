@@ -46,6 +46,9 @@ pub struct Desktop {
     pub last_escape: std::collections::HashMap<egui::ViewportId, f64>,
     pub last_action: String,
     pub focus_dialog: bool,
+    pub schedule: Option<crate::schedule::ScheduleEdit>,
+    /// Open memos as stickers; the editor is entered from the sticker's edit button.
+    pub always_sticker: bool,
 }
 impl Default for Desktop {
     fn default() -> Self {
@@ -94,6 +97,8 @@ impl Default for Desktop {
             last_escape: Default::default(),
             last_action: String::new(),
             focus_dialog: false,
+            schedule: None,
+            always_sticker: true,
         }
     }
 }
@@ -109,17 +114,31 @@ pub fn infer_title(title: &mut String, body: &mut String) {
     if !title.trim().is_empty() {
         return;
     }
-    if let Some((offset, line)) = body
+    // The first line with real text becomes the title. Inline pictures on
+    // that line stay in the body; a picture-only line never becomes a title.
+    if let Some((offset, line, text)) = body
         .split_inclusive('\n')
         .scan(0usize, |pos, line| {
             let old = *pos;
             *pos += line.len();
             Some((old, line))
         })
-        .find(|(_, line)| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .map(|(offset, line)| (offset, line, crate::composer::strip_pictures(line)))
+        .find(|(_, _, text)| !text.trim().is_empty() && !text.trim_start().starts_with('#'))
     {
-        *title = line.trim().into();
-        body.replace_range(offset..offset + line.len(), "");
+        *title = text.trim().into();
+        let pictures: String = line
+            .chars()
+            .filter(|c| crate::composer::is_picture(*c))
+            .collect();
+        let keep = if pictures.is_empty() {
+            String::new()
+        } else if line.ends_with('\n') {
+            format!("{pictures}\n")
+        } else {
+            pictures
+        };
+        body.replace_range(offset..offset + line.len(), &keep);
     }
 }
 impl App {
@@ -288,80 +307,136 @@ impl App {
         self.desktop.reminder_minute = t.minute();
     }
     pub fn desktop_dialogs(&mut self, ctx: &egui::Context) {
-        if self.desktop.focus_dialog {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            self.desktop.focus_dialog = false;
+        if std::mem::take(&mut self.desktop.focus_dialog) {
+            for id in [
+                "project_popup",
+                "lock_dialog",
+                "reminder_dialog",
+                "purge_dialog",
+                "schedule_dialog",
+            ] {
+                crate::ui::raise(ctx, id);
+            }
         }
         if self.desktop.project_popup {
             let mut open = true;
-            egui::Window::new("프로젝트 선택")
-                .open(&mut open)
-                .default_width(300.)
-                .show(ctx, |ui| {
-                    if ui
-                        .selectable_label(self.project_filter.is_none(), "모든 프로젝트")
+            crate::ui::dialog(
+                ctx,
+                "project_popup",
+                "프로젝트 선택",
+                [300., 380.],
+                true,
+                &mut open,
+                |ui| {
+                    crate::ui::caption(ui, "프로젝트로 필터");
+                    ui.add_space(4.);
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let mut pick = None;
+                        if crate::studio::project_button(
+                            ui,
+                            "모든 프로젝트",
+                            self.project_filter.is_none(),
+                        )
                         .clicked()
-                    {
-                        self.project_filter = None;
-                        self.desktop.project_popup = false;
-                    }
-                    if ui
-                        .selectable_label(self.project_filter == Some(NO_PROJECT), "프로젝트 없음")
-                        .clicked()
-                    {
-                        self.project_filter = Some(NO_PROJECT);
-                        self.desktop.project_popup = false;
-                    }
-                    for (i, name) in self.data.projects.iter().enumerate() {
-                        if self.extra.hidden_projects.contains(&i)
-                            || self.extra.deleted_projects.contains(&i)
                         {
-                            continue;
+                            pick = Some(None);
                         }
-                        if ui
-                            .selectable_label(self.project_filter == Some(i), name)
-                            .clicked()
+                        if crate::studio::project_button(
+                            ui,
+                            "프로젝트 없음",
+                            self.project_filter == Some(NO_PROJECT),
+                        )
+                        .clicked()
                         {
-                            self.project_filter = Some(i);
+                            pick = Some(Some(NO_PROJECT));
+                        }
+                        for (i, name) in self.data.projects.iter().enumerate() {
+                            if self.extra.hidden_projects.contains(&i)
+                                || self.extra.deleted_projects.contains(&i)
+                            {
+                                continue;
+                            }
+                            if crate::studio::project_button(
+                                ui,
+                                name,
+                                self.project_filter == Some(i),
+                            )
+                            .clicked()
+                            {
+                                pick = Some(Some(i));
+                            }
+                        }
+                        if let Some(p) = pick {
+                            self.project_filter = p;
                             self.page = 0;
                             self.desktop.project_popup = false;
                         }
-                    }
-                });
+                    });
+                },
+            );
             self.desktop.project_popup &= open;
         }
         if let Some((i, set, sticker)) = self.desktop.lock_target {
             let mut open = true;
             let mut apply = false;
-            egui::Window::new(if set {
-                "메모 잠금 설정"
-            } else {
-                "메모 잠금 해제"
-            })
-            .id(egui::Id::new("lock_dialog"))
-            .open(&mut open)
-            .collapsible(false)
-            .default_width(340.)
-            .show(ctx, |ui| {
-                ui.strong(&self.data.notes[i].title);
-                ui.label("미리보기 잠금입니다. 암호화 저장은 아직 연결하지 않았습니다.");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.desktop.lock_input)
-                        .password(true)
-                        .hint_text("비밀번호"),
-                );
+            crate::ui::dialog(
+                ctx,
+                "lock_dialog",
                 if set {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.desktop.lock_confirm)
-                            .password(true)
-                            .hint_text("비밀번호 확인"),
+                    "메모 잠금"
+                } else {
+                    "잠금 해제"
+                },
+                [360., 280.],
+                true,
+                &mut open,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        crate::icons::paint_icon(
+                            ui.painter(),
+                            egui::Rect::from_min_size(ui.cursor().min, Vec2::splat(20.)),
+                            crate::icons::Icon::Lock,
+                            ACCENT,
+                        );
+                        ui.add_space(26.);
+                        ui.label(RichText::new(&self.data.notes[i].title).strong().size(15.));
+                    });
+                    crate::ui::hint(
+                        ui,
+                        "화면 잠금 미리보기입니다 · 암호화 저장은 아직 연결 전입니다",
                     );
-                }
-                if !self.desktop.lock_error.is_empty() {
-                    ui.colored_label(ACCENT, &self.desktop.lock_error);
-                }
-                apply = ui.button(if set { "잠그기" } else { "열기" }).clicked();
-            });
+                    ui.add_space(10.);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.desktop.lock_input)
+                            .password(true)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(10, 7))
+                            .hint_text("비밀번호"),
+                    );
+                    if self.desktop.lock_input.is_empty() && !r.has_focus() {
+                        r.request_focus();
+                    }
+                    if set {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.desktop.lock_confirm)
+                                .password(true)
+                                .desired_width(f32::INFINITY)
+                                .margin(egui::Margin::symmetric(10, 7))
+                                .hint_text("비밀번호 확인"),
+                        );
+                    }
+                    if !self.desktop.lock_error.is_empty() {
+                        ui.colored_label(ACCENT, &self.desktop.lock_error);
+                    }
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let (ok, cancel) =
+                        crate::ui::dialog_buttons(ui, if set { "잠그기" } else { "열기" }, "취소");
+                    apply = ok || enter;
+                    if cancel {
+                        self.desktop.lock_target = None;
+                    }
+                },
+            );
             if apply {
                 let valid = if set {
                     !self.desktop.lock_input.is_empty()
@@ -393,7 +468,7 @@ impl App {
                     .into();
                 }
             }
-            if !open {
+            if !open || self.desktop.lock_target.is_none() {
                 self.desktop.lock_target = None;
                 self.desktop.lock_input.clear();
                 self.desktop.lock_confirm.clear();
@@ -403,41 +478,79 @@ impl App {
             let mut open = true;
             let mut applied = false;
             let mut cleared = false;
-            egui::Window::new("알람 설정")
-                .id(egui::Id::new("reminder_dialog"))
-                .open(&mut open)
-                .collapsible(false)
-                .default_width(320.)
-                .show(ctx, |ui| {
-                    ui.strong(&self.data.notes[i].title);
-                    calendar_input(
+            crate::ui::dialog(
+                ctx,
+                "reminder_dialog",
+                "알람 설정",
+                [340., 470.],
+                true,
+                &mut open,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        crate::icons::paint_icon(
+                            ui.painter(),
+                            egui::Rect::from_min_size(ui.cursor().min, Vec2::splat(20.)),
+                            crate::icons::Icon::Alarm,
+                            ACCENT,
+                        );
+                        ui.add_space(26.);
+                        ui.label(
+                            RichText::new(if self.data.notes[i].title.is_empty() {
+                                "새 메모"
+                            } else {
+                                &self.data.notes[i].title
+                            })
+                            .strong()
+                            .size(15.),
+                        );
+                    });
+                    ui.add_space(8.);
+                    ui.horizontal_wrapped(|ui| {
+                        let now = Local::now().naive_local();
+                        for (label, t) in [
+                            ("+10분", now + Duration::minutes(10)),
+                            ("+1시간", now + Duration::hours(1)),
+                            ("오늘 18:00", now.date().and_hms_opt(18, 0, 0).unwrap()),
+                            (
+                                "내일 09:00",
+                                (now.date() + Duration::days(1))
+                                    .and_hms_opt(9, 0, 0)
+                                    .unwrap(),
+                            ),
+                        ] {
+                            if crate::ui::pill(ui, false, label).clicked() {
+                                use chrono::Timelike;
+                                self.desktop.reminder_date = t.date();
+                                self.desktop.reminder_month = t.date().with_day(1).unwrap();
+                                self.desktop.reminder_hour = t.hour();
+                                self.desktop.reminder_minute = t.minute();
+                            }
+                        }
+                    });
+                    ui.add_space(10.);
+                    crate::ui::month_grid(
                         ui,
                         &mut self.desktop.reminder_month,
                         &mut self.desktop.reminder_date,
                     );
-                    ui.horizontal(|ui| {
-                        ui.label("시간");
-                        ui.add(
-                            egui::DragValue::new(&mut self.desktop.reminder_hour)
-                                .range(0..=23)
-                                .suffix("시"),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.desktop.reminder_minute)
-                                .range(0..=59)
-                                .suffix("분"),
-                        );
-                    });
-                    ui.label(
-                        RichText::new("알람 표시 미리보기 · Windows 알림은 후속 연결")
-                            .small()
-                            .color(MUTED),
+                    ui.add_space(6.);
+                    crate::ui::time_row(
+                        ui,
+                        &mut self.desktop.reminder_hour,
+                        &mut self.desktop.reminder_minute,
                     );
-                    ui.horizontal(|ui| {
-                        applied = ui.button("설정").clicked();
-                        cleared = ui.button("알람 해제").clicked();
+                    crate::ui::hint(ui, "Windows 알림 연결은 후속 단계입니다");
+                    ui.add_space(4.);
+                    let mut out = (false, false);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        out.0 = crate::ui::primary(ui, "설정").clicked();
+                        if self.data.notes[i].reminder.is_some() {
+                            out.1 = ui.button("알람 해제").clicked();
+                        }
                     });
-                });
+                    (applied, cleared) = out;
+                },
+            );
             if applied {
                 self.data.notes[i].reminder = self.desktop.reminder_date.and_hms_opt(
                     self.desktop.reminder_hour,
@@ -454,26 +567,35 @@ impl App {
                 self.desktop.reminder_target = None;
             }
         }
+        self.schedule_dialog(ctx);
         if let Some(i) = self.desktop.purge_target {
             let mut open = true;
             let mut purge = false;
-            egui::Window::new("메모 영구삭제")
-                .id(egui::Id::new("purge_dialog"))
-                .open(&mut open)
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label(format!(
-                        "‘{}’의 내용과 댓글을 삭제할까요?",
-                        self.data.notes[i].title
-                    ));
-                    ui.label("이 작업은 실행 중인 미리보기에서 되돌릴 수 없습니다.");
-                    ui.horizontal(|ui| {
-                        purge = ui.button(RichText::new("영구삭제").color(ACCENT)).clicked();
-                        if ui.button("취소").clicked() {
-                            self.desktop.purge_target = None;
-                        }
-                    });
-                });
+            crate::ui::dialog(
+                ctx,
+                "purge_dialog",
+                "메모 영구삭제",
+                [380., 200.],
+                true,
+                &mut open,
+                |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "‘{}’을(를) 영구삭제할까요?",
+                            self.data.notes[i].title
+                        ))
+                        .strong()
+                        .size(15.),
+                    );
+                    ui.add_space(4.);
+                    crate::ui::hint(ui, "본문과 댓글이 모두 삭제되며 되돌릴 수 없습니다.");
+                    let (ok, cancel) = crate::ui::dialog_buttons(ui, "영구삭제", "취소");
+                    purge = ok;
+                    if cancel {
+                        self.desktop.purge_target = None;
+                    }
+                },
+            );
             if purge {
                 let n = &mut self.data.notes[i];
                 n.body.clear();
@@ -493,163 +615,360 @@ impl App {
         }
     }
     pub fn ppt_settings(&mut self, ui: &mut egui::Ui) {
+        let tone = crate::ui::t(ui);
+        let tabs = [
+            "일반",
+            "메인창",
+            "메모창",
+            "알람",
+            "단축키",
+            "백업 / 복원",
+            "정보",
+        ];
+        let icons = [
+            crate::icons::Icon::Settings,
+            crate::icons::Icon::Home,
+            crate::icons::Icon::Sticky,
+            crate::icons::Icon::Alarm,
+            crate::icons::Icon::Grid,
+            crate::icons::Icon::Folder,
+            crate::icons::Icon::Help,
+        ];
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(130.);
-                for (i, text) in ["일반", "메인창", "메모창", "알람", "단축키", "백업 / 복원", "정보"].iter().enumerate() {
-                    if ui.add_sized([126., 38.], egui::Button::new(*text).selected(self.desktop.settings_tab == i)).clicked() { self.desktop.settings_tab = i; }
+                ui.set_width(150.);
+                ui.label(RichText::new("설정").size(18.).strong());
+                ui.add_space(12.);
+                for (i, text) in tabs.iter().enumerate() {
+                    if crate::studio::nav_button(
+                        ui,
+                        text,
+                        self.desktop.settings_tab == i,
+                        icons[i],
+                        None,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        self.desktop.settings_tab = i;
+                        self.desktop.last_action.clear();
+                    }
                 }
             });
-            ui.separator();
-            egui::ScrollArea::vertical().id_salt("settings_content").max_height(520.).show(ui, |ui| {
-                ui.vertical(|ui| {
-                ui.set_width(560.);
-                match self.desktop.settings_tab {
-                    0 => {
-                        ui.heading("일반"); ui.add_space(16.);
-                        ui.checkbox(&mut self.desktop.autostart, "Windows 시작 시 자동 실행");
-                        ui.checkbox(&mut self.desktop.taskbar, "메모창을 작업표시줄에 표시");
-                        ui.label(RichText::new("운영체제 적용은 후속 단계입니다. 현재 선택값만 유지합니다.").small().color(MUTED));
-                        ui.add_space(14.); ui.strong("휴지통 보관 기간");
-                        choice(ui, "retention", &mut self.desktop.retention, &["7일", "30일", "90일", "365일", "자동삭제 안 함"]);
-                        ui.add_space(14.); ui.strong("잠긴 메모 자동 잠금");
-                        choice(ui, "auto_lock", &mut self.desktop.auto_lock, &["1분", "5분", "15분", "Windows 잠금 때만"]);
-                        ui.label(RichText::new("보관기간 자동삭제와 자동 잠금 타이머는 후속 연결").small().color(MUTED));
-                    }
-                    1 => {
-                        ui.heading("메인창"); ui.add_space(14.);
-                        ui.horizontal(|ui| { ui.selectable_value(&mut self.dark, false, "라이트 모드"); ui.selectable_value(&mut self.dark, true, "다크 모드"); });
-                        font_choice(ui, "main_font", &mut self.desktop.font);
-                        ui.add(egui::Slider::new(&mut self.desktop.font_size, 8.0..=22.0).text("글꼴 크기 (pt)"));
-                        ui.add(egui::Slider::new(&mut self.desktop.letter_spacing, -0.5..=1.0).step_by(0.5).text("자간"));
-                        choice(ui, "row_spacing", &mut self.desktop.row_spacing, &["좁게", "기본", "넓게"]);
-                        ui.separator(); ui.strong("내 작업실");
-                        ui.checkbox(&mut self.desktop.show_preview, "캘린더와 함께 볼 때 본문 한 줄 표시");
-                        ui.checkbox(&mut self.desktop.hide_locked, "잠긴 메모 숨기기");
-                        ui.checkbox(&mut self.desktop.hide_completed, "완료 메모 숨기기");
-                    }
-                    2 => {
-                        ui.heading("메모창"); ui.add_space(14.); ui.strong("새 메모 기본 색");
-                        color_choices(ui, &mut self.desktop.default_color);
-                        ui.checkbox(&mut self.desktop.auto_toolbar, "스티커 툴바 자동 숨기기");
-                        ui.checkbox(&mut self.desktop.skip_title, "접기 1단계 건너뛰기 · 바로 색상 상자로");
-                        ui.checkbox(&mut self.desktop.unpin_minimized, "최소화하면 항상 위에 자동 해제");
-                        ui.separator(); font_choice(ui, "note_font", &mut self.desktop.note_font);
-                        ui.add(egui::Slider::new(&mut self.desktop.note_font_size, 8.0..=30.0).text("기본 글자 크기 (pt)"));
-                        ui.add(egui::Slider::new(&mut self.desktop.opacity, 25.0..=100.0).text("기본 투명도 (%)"));
-                        ui.label(RichText::new("투명도는 메모 바탕색으로 미리 봅니다.").small().color(MUTED));
-                        ui.strong("이미지 붙여넣기 기본 크기"); choice(ui, "image_scale", &mut self.desktop.image_scale, &["25%", "50%", "75%", "100%", "너비 맞춤"]);
-                    }
-                    3 => {
-                        ui.heading("알람"); ui.add_space(14.);
-                        ui.horizontal(|ui| { ui.selectable_value(&mut self.desktop.sound, true, "Windows 기본 소리"); ui.selectable_value(&mut self.desktop.sound, false, "소리 없음"); });
-                        ui.checkbox(&mut self.desktop.popup, "바탕화면 우측 하단 팝업");
-                        ui.checkbox(&mut self.desktop.mute, "전체 알림 끄기");
-                        ui.add_space(16.); ui.label("메모별 알람 아이콘으로 날짜와 시간을 설정할 수 있습니다.");
-                        ui.label("알림센터 연동·메모 전면 표시·테두리 강조·트레이 상주는 후속 구현입니다.");
-                        if ui.button("알림 모양 미리보기").clicked() { self.desktop.last_action = "알림 미리보기 · 메모를 확인할 시간입니다".into(); }
-                    }
-                    4 => {
-                        self.settings_ui(ui);
-                        ui.separator(); ui.strong("프로그램 사용 중");
-                        for (key, label) in [("Ctrl+Shift+H", "모든 스티커 닫기"), ("Ctrl+T", "항상 위에 켜기/끄기"), ("Ctrl+B / I / U", "굵게 / 기울임 / 밑줄"), ("Ctrl+;", "날짜 넣기"), ("Ctrl+Shift+;", "날짜와 시간 넣기"), ("Ctrl+F", "빠른 검색"), ("Ctrl+H", "찾아 바꾸기"), ("Ctrl+P", "프로젝트 선택"), ("Esc 두 번", "현재 메모 닫기")] { ui.horizontal(|ui| { ui.monospace(key); ui.label(label); }); }
-                    }
-                    5 => {
-                        ui.heading("백업 / 복원"); ui.add_space(14.);
-                        ui.label("데이터 폴더"); ui.text_edit_singleline(&mut self.desktop.data_path);
-                        ui.horizontal(|ui| { if ui.button("폴더 선택").clicked() { if let Some(path) = rfd::FileDialog::new().pick_folder() { self.desktop.data_path = path.display().to_string(); } }
- if ui.button("데이터 가져오기").clicked() { self.desktop.last_action = "가져오기 화면 미리보기입니다. 실제 데이터는 변경하지 않았습니다.".into(); } });
-                        ui.separator(); ui.add(egui::Slider::new(&mut self.desktop.image_limit, 0.5..=10.).step_by(0.5).text("이미지 최대 저장 용량 (GB)"));
-                        ui.strong("이미지 정리 방법");
-                        choice(ui, "image_age", &mut self.desktop.image_age, &["용량 기준", "1년 이상", "2년 이상", "3년 이상"]);
-                        ui.label("백업 후 100 kB 이하 썸네일을 남기는 정책입니다.");
-                        if ui.button("썸네일 처리된 원본 일괄 정리").clicked() { self.desktop.last_action = "이미지 정리 정책을 선택했습니다. 이번 미리보기에서는 파일을 삭제하지 않습니다.".into(); }
-                        ui.label(RichText::new("설정 화면 미리보기 · 저장 및 백업 엔진은 연결 전").color(MUTED));
-                    }
-                    _ => { ui.heading("MEMONOKING"); ui.label("개인 메모와 일정 작업 공간"); ui.label("UI 미리보기 0.2.0"); ui.separator(); ui.label("화면·조작 미리보기입니다. 앱을 종료하면 메모와 설정이 초기화됩니다."); }
-                }
-                if !self.desktop.last_action.is_empty() { ui.add_space(12.); ui.colored_label(ACCENT, &self.desktop.last_action); }
+            ui.add_space(14.);
+            let (line, _) =
+                ui.allocate_exact_size(Vec2::new(1., ui.available_height()), egui::Sense::hover());
+            ui.painter().line_segment(
+                [line.center_top(), line.center_bottom()],
+                egui::Stroke::new(1.0_f32, tone.line),
+            );
+            ui.add_space(18.);
+            egui::ScrollArea::vertical()
+                .id_salt("settings_content")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - 12.).clamp(320., 600.));
+                        ui.label(
+                            RichText::new(tabs[self.desktop.settings_tab.min(6)])
+                                .size(17.)
+                                .strong(),
+                        );
+                        ui.add_space(14.);
+                        self.settings_page(ui);
+                        if !self.desktop.last_action.is_empty() {
+                            ui.add_space(12.);
+                            ui.colored_label(ACCENT, &self.desktop.last_action);
+                        }
+                    });
                 });
-            });
         });
+    }
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::{caption, hint, segmented, toggle_row};
+        let section = |ui: &mut egui::Ui, title: &str| {
+            ui.add_space(10.);
+            caption(ui, title);
+            ui.add_space(4.);
+        };
+        match self.desktop.settings_tab {
+            0 => {
+                toggle_row(
+                    ui,
+                    &mut self.desktop.autostart,
+                    "Windows 시작 시 자동 실행",
+                    "",
+                );
+                toggle_row(
+                    ui,
+                    &mut self.desktop.taskbar,
+                    "메모창을 작업표시줄에 표시",
+                    "끄면 트레이 아이콘으로만 표시합니다",
+                );
+                section(ui, "휴지통 보관 기간");
+                segmented(
+                    ui,
+                    &mut self.desktop.retention,
+                    &["7일", "30일", "90일", "365일", "자동삭제 안 함"],
+                );
+                section(ui, "잠긴 메모 자동 잠금");
+                segmented(
+                    ui,
+                    &mut self.desktop.auto_lock,
+                    &["1분", "5분", "15분", "Windows 잠금 때만"],
+                );
+                ui.add_space(14.);
+                hint(
+                    ui,
+                    "운영체제 연동과 자동 정리 타이머는 후속 단계에서 연결됩니다.",
+                );
+            }
+            1 => {
+                section(ui, "테마");
+                let mut theme = usize::from(self.dark);
+                if segmented(ui, &mut theme, &["라이트 모드", "다크 모드"]) {
+                    self.dark = theme == 1;
+                }
+                section(ui, "글꼴");
+                font_choice(ui, "main_font", &mut self.desktop.font);
+                section(ui, "글꼴 크기");
+                ui.add(
+                    egui::Slider::new(&mut self.desktop.font_size, 8.0..=16.0)
+                        .integer()
+                        .suffix(" pt"),
+                );
+                section(ui, "자간");
+                let steps = [-0.5, 0., 0.5, 1.0];
+                let mut at = steps
+                    .iter()
+                    .position(|v| (*v - self.desktop.letter_spacing).abs() < 0.01)
+                    .unwrap_or(1);
+                if segmented(ui, &mut at, &["-0.5", "기본", "+0.5", "+1.0"]) {
+                    self.desktop.letter_spacing = steps[at];
+                }
+                section(ui, "메모 목록 행 간격");
+                segmented(ui, &mut self.desktop.row_spacing, &["좁게", "기본", "넓게"]);
+                section(ui, "내 작업실");
+                toggle_row(
+                    ui,
+                    &mut self.desktop.show_preview,
+                    "캘린더와 함께 볼 때 본문 한 줄 표시",
+                    "",
+                );
+                toggle_row(ui, &mut self.desktop.hide_locked, "잠긴 메모 숨기기", "");
+                toggle_row(ui, &mut self.desktop.hide_completed, "완료 메모 숨기기", "");
+            }
+            2 => {
+                toggle_row(
+                    ui,
+                    &mut self.desktop.always_sticker,
+                    "메모를 항상 스티커 메모로 열기",
+                    "메모 편집 창은 스티커 제목줄의 편집 버튼으로 엽니다",
+                );
+                section(ui, "새 메모 기본 색");
+                color_choices(ui, &mut self.desktop.default_color);
+                ui.add_space(6.);
+                toggle_row(
+                    ui,
+                    &mut self.desktop.auto_toolbar,
+                    "스티커 툴바 자동 숨기기",
+                    "끄면 편집 중이 아니어도 도구가 항상 보입니다",
+                );
+                toggle_row(
+                    ui,
+                    &mut self.desktop.skip_title,
+                    "접기 1단계 건너뛰기",
+                    "스티커에서 바로 색상 상자로 접습니다",
+                );
+                toggle_row(
+                    ui,
+                    &mut self.desktop.unpin_minimized,
+                    "상자로 접으면 ‘항상 위에’ 자동 해제",
+                    "",
+                );
+                section(ui, "기본 글꼴");
+                font_choice(ui, "note_font", &mut self.desktop.note_font);
+                section(ui, "기본 글자 크기");
+                ui.add(
+                    egui::Slider::new(&mut self.desktop.note_font_size, 8.0..=30.0)
+                        .integer()
+                        .suffix(" pt"),
+                );
+                section(ui, "기본 투명도");
+                ui.add(
+                    egui::Slider::new(&mut self.desktop.opacity, 20.0..=100.0)
+                        .integer()
+                        .suffix("%"),
+                );
+                hint(ui, "투명도를 낮추면 스티커 뒤의 바탕화면이 비쳐 보입니다.");
+                section(ui, "이미지 붙여넣기 기본 크기");
+                segmented(
+                    ui,
+                    &mut self.desktop.image_scale,
+                    &["25%", "50%", "75%", "100%", "너비 맞춤"],
+                );
+            }
+            3 => {
+                section(ui, "알림 소리");
+                let mut sound = usize::from(!self.desktop.sound);
+                if segmented(ui, &mut sound, &["Windows 기본", "소리 없음"]) {
+                    self.desktop.sound = sound == 0;
+                }
+                ui.add_space(10.);
+                toggle_row(
+                    ui,
+                    &mut self.desktop.popup,
+                    "바탕화면 우측 하단에 팝업으로 알리기",
+                    "",
+                );
+                toggle_row(
+                    ui,
+                    &mut self.desktop.mute,
+                    "전체 알림 끄기",
+                    "다시 켜면 알람이 설정된 메모의 알림이 재설정됩니다",
+                );
+                ui.add_space(10.);
+                hint(
+                    ui,
+                    "Windows 알림센터 연동 · 알람 메모 강조 · 트레이 상주는 후속 단계입니다.",
+                );
+                ui.add_space(6.);
+                if ui.button("알림 모양 미리보기").clicked() {
+                    self.desktop.last_action = "알림 미리보기 · 메모를 확인할 시간입니다".into();
+                }
+            }
+            4 => {
+                section(ui, "전역 단축키");
+                hint(ui, "다른 프로그램을 쓰는 중에도 동작합니다");
+                ui.add_space(4.);
+                for (i, name) in ["빠른 메모", "캘린더 분리창", "새 스티커 메모"]
+                    .iter()
+                    .enumerate()
+                {
+                    crate::ui::field(ui, name, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.shortcuts[i])
+                                .desired_width(200.)
+                                .margin(egui::Margin::symmetric(8, 5)),
+                        );
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if crate::ui::primary(ui, "단축키 적용").clicked() {
+                        self.apply_shortcuts();
+                    }
+                    hint(ui, &self.hotkey_status);
+                });
+                hint(ui, "예: Ctrl+Alt+N · 충돌하면 기존 설정으로 복구됩니다");
+                section(ui, "프로그램 사용 중");
+                let tone = crate::ui::t(ui);
+                for (key, label) in [
+                    ("Ctrl+Shift+H", "모든 스티커 닫기"),
+                    ("Ctrl+T", "항상 위에 켜기/끄기"),
+                    ("Ctrl+B / I / U", "굵게 / 기울임 / 밑줄"),
+                    ("~~ Space", "직전 단어 취소선"),
+                    ("~~~ Space", "한 줄 전체 취소선"),
+                    ("[] Space", "체크박스 넣기"),
+                    ("Ctrl+;", "날짜 넣기"),
+                    ("Ctrl+Shift+;", "날짜와 시간 넣기"),
+                    ("Ctrl+F", "빠른 검색"),
+                    ("Ctrl+H", "찾아 바꾸기"),
+                    ("Ctrl+P", "프로젝트 선택"),
+                    ("#이름 Space", "본문 첫 줄에서 프로젝트 지정"),
+                    ("Esc Esc", "메모 닫기"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([180., 22.], egui::Label::new(RichText::new(label)));
+                        crate::ui::chip(ui, key, tone.field, tone.muted);
+                    });
+                }
+            }
+            5 => {
+                section(ui, "데이터 위치");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.desktop.data_path)
+                            .desired_width(ui.available_width() - 90.)
+                            .margin(egui::Margin::symmetric(8, 5))
+                            .hint_text("데이터 저장 폴더"),
+                    );
+                    if ui.button("폴더 선택").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.desktop.data_path = path.display().to_string();
+                        }
+                    }
+                });
+                ui.add_space(4.);
+                if ui.button("데이터 가져오기…").clicked() {
+                    self.desktop.last_action =
+                        "가져오기 화면 미리보기입니다. 실제 데이터는 변경하지 않았습니다.".into();
+                }
+                section(ui, "이미지 최대 저장 용량");
+                ui.add(
+                    egui::Slider::new(&mut self.desktop.image_limit, 0.5..=10.)
+                        .step_by(0.5)
+                        .suffix(" GB"),
+                );
+                section(ui, "오래된 이미지 정리");
+                segmented(
+                    ui,
+                    &mut self.desktop.image_age,
+                    &["용량 기준", "1년 이상", "2년 이상", "3년 이상"],
+                );
+                hint(ui, "백업 후 100 kB 이하 썸네일만 남깁니다.");
+                ui.add_space(6.);
+                if ui.button("썸네일 처리된 원본 일괄 정리").clicked() {
+                    self.desktop.last_action =
+                        "정리 정책을 선택했습니다. 이번 미리보기에서는 파일을 삭제하지 않습니다."
+                            .into();
+                }
+                ui.add_space(10.);
+                hint(ui, "저장·백업 엔진은 아직 연결 전입니다.");
+            }
+            _ => {
+                ui.label(RichText::new("MEMONOKING").size(16.).strong());
+                hint(ui, "개인 메모와 일정 작업 공간 · UI 미리보기 0.2.0");
+                ui.add_space(10.);
+                ui.label("화면·조작 미리보기입니다. 앱을 종료하면 메모와 설정이 초기화됩니다.");
+            }
+        }
     }
 }
 fn font_choice(ui: &mut egui::Ui, id: &str, value: &mut String) {
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(value.as_str())
-        .show_ui(ui, |ui| {
+    ui.push_id(id, |ui| {
+        ui.horizontal_wrapped(|ui| {
             for name in ["맑은 고딕", "굴림", "돋움", "바탕", "궁서체", "개구쟁이"]
             {
-                ui.selectable_value(value, name.into(), name);
+                if crate::ui::pill(ui, value == name, name).clicked() {
+                    *value = name.into();
+                }
             }
         });
-    ui.label(
-        RichText::new("설치된 글꼴을 사용하며 없으면 기본 글꼴로 표시합니다.")
-            .small()
-            .color(MUTED),
-    );
-}
-fn choice(ui: &mut egui::Ui, id: &str, value: &mut usize, choices: &[&str]) {
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(choices[(*value).min(choices.len() - 1)])
-        .show_ui(ui, |ui| {
-            for (i, text) in choices.iter().enumerate() {
-                ui.selectable_value(value, i, *text);
-            }
-        });
+    });
+    crate::ui::hint(ui, "설치된 글꼴을 사용하며 없으면 기본 글꼴로 표시합니다.");
 }
 pub fn color_choices(ui: &mut egui::Ui, color: &mut Color32) {
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.);
         for c in PALETTE {
-            let r = ui.add_sized(
-                [28., 28.],
-                egui::Button::new(if *color == c { "✓" } else { "" }).fill(c),
+            let (rect, r) = ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::click());
+            let selected = *color == c;
+            ui.painter().circle_filled(rect.center(), 11., c);
+            ui.painter().circle_stroke(
+                rect.center(),
+                11.,
+                egui::Stroke::new(1.0_f32, Color32::from_black_alpha(30)),
             );
-            if r.clicked() {
+            if selected {
+                ui.painter()
+                    .circle_stroke(rect.center(), 12.5, egui::Stroke::new(2.0_f32, ACCENT));
+            }
+            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 *color = c;
             }
         }
-    });
-    ui.horizontal(|ui| {
-        ui.label("사용자 지정");
-        ui.color_edit_button_srgba(color);
-    });
-}
-pub fn calendar_input(ui: &mut egui::Ui, month: &mut NaiveDate, day: &mut NaiveDate) {
-    ui.horizontal(|ui| {
-        if ui.button("‹").clicked() {
-            *month = (*month - Duration::days(1)).with_day(1).unwrap();
-        }
-        ui.strong(month.format("%Y년 %m월").to_string());
-        if ui.button("›").clicked() {
-            *month = (*month + Duration::days(32)).with_day(1).unwrap();
-        }
-    });
-    egui::Grid::new("reminder_calendar").show(ui, |ui| {
-        for s in ["일", "월", "화", "수", "목", "금", "토"] {
-            ui.label(s);
-        }
-        ui.end_row();
-        let offset = month.weekday().num_days_from_sunday() as i64;
-        for slot in 0..42 {
-            let d = *month + Duration::days(slot - offset);
-            if d.month() == month.month() {
-                if ui
-                    .add_sized(
-                        [30., 26.],
-                        egui::Button::new(d.day().to_string()).selected(*day == d),
-                    )
-                    .clicked()
-                {
-                    *day = d;
-                }
-            } else {
-                ui.label("");
-            }
-            if slot % 7 == 6 {
-                ui.end_row();
-            }
-        }
+        ui.color_edit_button_srgba(color)
+            .on_hover_text("사용자 지정 색");
     });
 }
 #[cfg(test)]

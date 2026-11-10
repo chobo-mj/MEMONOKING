@@ -44,10 +44,14 @@ pub struct Catalog {
     dragging: Option<(FolderDrag, egui::Pos2)>,
     table_offset: f32,
     table_viewport_width: f32,
+    table_width: f32,
+    pub preview_width: f32,
 }
 
-const COLUMN_WIDTHS: [f32; 8] = [32., 32., 180., 240., 140., 85., 140., 32.];
-const TABLE_WIDTH: f32 = 881.;
+/// Fixed columns stay compact; title (2) and body (3) share the rest.
+const COLUMN_WIDTHS: [f32; 8] = [30., 30., 0., 0., 96., 58., 86., 30.];
+/// The narrowest table: below this the list scrolls horizontally.
+const TABLE_WIDTH: f32 = 560.;
 
 #[derive(Clone, Copy)]
 enum TableRow {
@@ -67,14 +71,21 @@ enum TableCommand {
     PurgeTab(usize, usize),
 }
 
+/// Column rectangles. The title and body columns take all width left by the
+/// compact fixed columns, so they grow and shrink with the list pane.
 fn table_cells(rect: egui::Rect) -> [egui::Rect; 8] {
+    let fixed: f32 = COLUMN_WIDTHS.iter().sum();
+    let flex = (rect.width().max(TABLE_WIDTH) - fixed).max(0.);
+    let mut widths = COLUMN_WIDTHS;
+    widths[2] = (flex * 0.38).max(110.);
+    widths[3] = (flex - widths[2]).max(0.);
     let mut x = rect.left();
     std::array::from_fn(|i| {
         let r = egui::Rect::from_min_size(
             egui::pos2(x, rect.top()),
-            Vec2::new(COLUMN_WIDTHS[i], rect.height()),
+            Vec2::new(widths[i], rect.height()),
         );
-        x += COLUMN_WIDTHS[i];
+        x += widths[i];
         r
     })
 }
@@ -273,16 +284,11 @@ impl App {
     pub fn catalog_ui(&mut self, ui: &mut egui::Ui) {
         self.catalog.drag_sources.clear();
         self.catalog.drag_targets.clear();
-        ui.heading("전체메모");
-        ui.add_space(10.);
-        ui.horizontal(|ui| {
-            for (i, name) in ["폴더 보기", "전체 메모 보기", "관계 보드"]
-                .iter()
-                .enumerate()
-            {
-                ui.selectable_value(&mut self.catalog.tab, i, *name);
-            }
-        });
+        ui::tabs(
+            ui,
+            &mut self.catalog.tab,
+            &["폴더 보기", "전체 메모 보기", "관계 보드"],
+        );
         ui.add_space(12.);
         if self.catalog.tab == 2 {
             self.board(ui);
@@ -305,23 +311,8 @@ impl App {
     }
 
     pub fn detail_workspace(&mut self, ui: &mut egui::Ui, mode: usize) {
-        ui.horizontal(|ui| {
-            ui.heading(if self.extra.search_mode {
-                "검색 결과"
-            } else {
-                "내 작업실"
-            });
-            if ui.button("캘린더 나란히").clicked() {
-                self.split = true;
-            }
-        });
-        ui.label(
-            RichText::new("자세히 보기 · 방향키로 선택 · 제목과 본문을 눌러 편집")
-                .small()
-                .color(MUTED),
-        );
         self.filters(ui);
-        ui.add_space(8.);
+        ui.add_space(10.);
         let today = Local::now().date_naive();
         let mut rows = vec![];
         for (i, n) in self.data.notes.iter().enumerate() {
@@ -446,30 +437,40 @@ impl App {
         }
         let mut direction = 0;
         let mut reset = false;
-        ui.horizontal_wrapped(|ui| {
-            let r = ui.add(
-                egui::TextEdit::singleline(&mut self.catalog.query)
-                    .desired_width(200.)
-                    .hint_text("이 목록에서 빠른 찾기"),
+        let mut status = None;
+        let status_slot = ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.;
+            let r = ui::search_field(
+                ui,
+                &mut self.catalog.query,
+                "catalog_find",
+                "목록에서 찾기  Ctrl+F",
+                240.,
             );
             if self.catalog.find_focus {
                 r.request_focus();
                 self.catalog.find_focus = false;
             }
             reset = r.changed();
-            if ui.small_button("이전 찾기").clicked() {
+            if crate::icons::small_icon(ui, crate::icons::Icon::ChevronLeft, "이전 찾기").clicked()
+            {
                 direction = -1;
             }
-            if ui.small_button("다음 찾기").clicked()
+            if crate::icons::small_icon(ui, crate::icons::Icon::ChevronRight, "다음 찾기  Enter")
+                .clicked()
                 || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
             {
                 direction = 1;
             }
-            if ui.small_button("찾아 바꾸기").clicked() {
+            let slot = ui.cursor().min;
+            ui.add_space(64.);
+            if ui.button("찾아 바꾸기").clicked() {
                 self.catalog.replace_open = true;
                 self.catalog.replace_find = self.catalog.query.clone();
             }
+            slot
         });
+        let slot = status_slot.inner;
         let hits = self.catalog_find_hits(ids);
         if reset {
             self.catalog.find_index = 0;
@@ -496,16 +497,17 @@ impl App {
                     None
                 };
             }
-            ui.label(
-                RichText::new(format!("{} / {} 위치", self.catalog.find_index + 1, len))
-                    .small()
-                    .color(MUTED),
-            );
+            status = Some(format!("{} / {}", self.catalog.find_index + 1, len));
         } else if !self.catalog.query.is_empty() {
-            ui.label(
-                RichText::new("일치하는 내용을 찾지 못했습니다")
-                    .small()
-                    .color(MUTED),
+            status = Some("결과 없음".into());
+        }
+        if let Some(text) = status {
+            ui.painter().text(
+                slot + Vec2::new(6., 13.),
+                egui::Align2::LEFT_CENTER,
+                text,
+                egui::FontId::proportional(12.),
+                ui::t(ui).muted,
             );
         }
         ui.add_space(8.);
@@ -584,8 +586,15 @@ impl App {
         let height = panel_height(ui);
         let rect =
             egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), height));
-        let preview_width = (rect.width() - TABLE_WIDTH - 16.).clamp(250., 300.);
+        if self.catalog.preview_width <= 0. {
+            self.catalog.preview_width = 300.;
+        }
+        // The list keeps at least its narrowest table; widening the preview
+        // shrinks the list's title and body columns.
+        let preview_max = (rect.width() - 30. - TABLE_WIDTH).max(240.);
+        let preview_width = self.catalog.preview_width.clamp(240., preview_max);
         let list_width = (rect.width() - preview_width - 16.).max(180.);
+        self.catalog.table_width = TABLE_WIDTH.max(list_width - 14.);
         let table_rows: Vec<_> = rows.iter().map(|&(i, d)| TableRow::Note(i, d)).collect();
         ui.allocate_new_ui(
             egui::UiBuilder::new()
@@ -613,6 +622,27 @@ impl App {
                     false,
                     date_groups,
                 );
+                let handle = egui::Rect::from_min_max(
+                    egui::pos2(list_rect.right() + 2., rect.top()),
+                    egui::pos2(list_rect.right() + 14., rect.bottom()),
+                );
+                let drag = ui
+                    .interact(handle, ui.id().with("preview_splitter"), Sense::drag())
+                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                    .on_hover_text("드래그해서 미리보기 너비 조절");
+                if drag.hovered() || drag.dragged() {
+                    ui.painter().line_segment(
+                        [handle.center_top(), handle.center_bottom()],
+                        Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.6)),
+                    );
+                }
+                if drag.dragged() {
+                    self.catalog.preview_width =
+                        (preview_width - drag.drag_delta().x).clamp(240., preview_max);
+                }
+                if drag.double_clicked() {
+                    self.catalog.preview_width = 300.;
+                }
                 let mut preview = ui.new_child(
                     egui::UiBuilder::new()
                         .id_salt("detail_preview_pane")
@@ -639,10 +669,10 @@ impl App {
         } else {
             ui.available_width()
         };
-        let offset = self
-            .catalog
-            .table_offset
-            .clamp(0., (TABLE_WIDTH - header_width).max(0.));
+        let offset = self.catalog.table_offset.clamp(
+            0.,
+            (self.catalog.table_width.max(TABLE_WIDTH) - header_width).max(0.),
+        );
         egui::ScrollArea::horizontal()
             .id_salt(("table_header", trash))
             .horizontal_scroll_offset(offset)
@@ -651,13 +681,12 @@ impl App {
             .max_width(header_width)
             .max_height(36.)
             .show(ui, |ui| {
-                ui.set_min_width(TABLE_WIDTH);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(TABLE_WIDTH, 36.), Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, 0., ui.visuals().faint_bg_color);
+                let table_width = self.catalog.table_width.max(TABLE_WIDTH);
+                ui.set_min_width(table_width);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(table_width, 34.), Sense::hover());
                 ui.painter().line_segment(
                     [rect.left_bottom(), rect.right_bottom()],
-                    Stroke::new(1_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                    Stroke::new(1_f32, ui::t(ui).line),
                 );
                 let cells = table_cells(rect);
                 for (col, title) in [
@@ -687,7 +716,7 @@ impl App {
             .auto_shrink([false, false])
             .max_height((height - 44.).max(100.))
             .show(ui, |ui| {
-                ui.set_min_width(TABLE_WIDTH);
+                ui.set_min_width(self.catalog.table_width.max(TABLE_WIDTH));
                 if rows.is_empty() {
                     ui.add_space(24.);
                     ui.label(RichText::new("표시할 메모가 없습니다").color(MUTED));
@@ -696,8 +725,10 @@ impl App {
                 for (at, &row) in rows.iter().enumerate() {
                     if let TableRow::Note(_, day) = row {
                         if date_groups && previous != day {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::new(TABLE_WIDTH, 26.), Sense::hover());
+                            let (rect, _) = ui.allocate_exact_size(
+                                Vec2::new(self.catalog.table_width.max(TABLE_WIDTH), 28.),
+                                Sense::hover(),
+                            );
                             ui.painter().text(
                                 rect.left_center() + Vec2::new(7., 0.),
                                 egui::Align2::LEFT_CENTER,
@@ -772,21 +803,24 @@ impl App {
         let locked = n.locked;
         let selected = self.catalog.selected == Some(i) || self.catalog.selected_many.contains(&i);
         let height = match self.desktop.row_spacing {
-            0 => 38.,
-            2 => 58.,
-            _ => 48.,
+            0 => 34.,
+            2 => 52.,
+            _ => 42.,
         };
         ui.push_id(("table_row", i, day, tab, trash), |ui| {
-            let (rect, response) =
-                ui.allocate_exact_size(Vec2::new(TABLE_WIDTH, height), Sense::hover());
+            let (rect, response) = ui.allocate_exact_size(
+                Vec2::new(self.catalog.table_width.max(TABLE_WIDTH), height),
+                Sense::hover(),
+            );
             let fill = if selected {
                 ui.visuals().selection.bg_fill
-            } else if at % 2 == 1 {
-                ui.visuals().faint_bg_color
+            } else if ui.rect_contains_pointer(rect) {
+                ui::t(ui).hover.gamma_multiply(0.6)
             } else {
                 Color32::TRANSPARENT
             };
-            ui.painter().rect_filled(rect, 0., fill);
+            let _ = at;
+            ui.painter().rect_filled(rect, 6., fill);
             ui.painter().line_segment(
                 [rect.left_bottom(), rect.right_bottom()],
                 Stroke::new(
@@ -823,16 +857,18 @@ impl App {
             }
             {
                 let mut c = table_cell(ui, cells[1], "done");
-                if c.add_enabled(!trash, egui::Checkbox::new(&mut done, ""))
-                    .on_hover_text("완료 상태")
-                    .changed()
+                if c.add_enabled(!trash, |ui: &mut egui::Ui| {
+                    ui::round_check(ui, &mut done, None)
+                })
+                .on_hover_text("완료 상태")
+                .changed()
                 {
                     pending.push(TableCommand::Complete(i, day, done));
                 }
             }
             {
                 let mut c = table_cell(ui, cells[2], "title");
-                let mut text = RichText::new(&title).strong();
+                let mut text = RichText::new(&title);
                 if done {
                     text = text.strikethrough().color(MUTED);
                 }
@@ -1008,15 +1044,20 @@ impl App {
             .selected
             .filter(|&i| i < self.data.notes.len() && !self.data.notes[i].deleted)
         else {
+            let tone = ui::t(ui);
             egui::Frame::NONE
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(8.)
+                .fill(tone.sidebar)
+                .corner_radius(12.)
                 .inner_margin(18.)
                 .show(ui, |ui| {
                     ui.set_min_height(height - 36.);
-                    ui.label(
-                        RichText::new("메모를 선택하면 여기에서 읽고 수정할 수 있습니다")
-                            .color(MUTED),
+                    ui.set_min_width(ui.available_width());
+                    ui.add_space(height * 0.28);
+                    ui::empty_state(
+                        ui,
+                        crate::icons::Icon::Notes,
+                        "선택한 메모가 없습니다",
+                        "목록에서 메모를 고르면 여기에서 바로 읽고 고칠 수 있습니다",
                     );
                 });
             return;
@@ -1045,20 +1086,29 @@ impl App {
     }
 
     fn catalog_folders(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("+ 새 폴더").clicked() {
-                self.catalog.create_folder();
-            }
+        ui.horizontal(|ui| {
             if ui
-                .selectable_label(self.catalog.folder_selected.is_none(), "최상위 선택")
+                .add(egui::Button::new(RichText::new("+  새 폴더").strong()))
                 .clicked()
             {
+                self.catalog.create_folder();
+            }
+            if ui::pill(ui, self.catalog.folder_selected.is_none(), "최상위").clicked() {
                 self.catalog.folder_selected = None;
             }
-            ui.label(
-                RichText::new("폴더 선택 후 추가하면 하위 폴더가 됩니다")
-                    .small()
-                    .color(MUTED),
+            ui::hint(
+                ui,
+                match self
+                    .catalog
+                    .folder_selected
+                    .and_then(|f| self.catalog.folders.get(f))
+                {
+                    Some(f) => format!(
+                        "새 폴더는 ‘{}’ 아래에 만들어집니다 · 이름은 더블클릭으로 수정",
+                        f.title
+                    ),
+                    None => "폴더를 선택한 뒤 추가하면 하위 폴더가 됩니다".into(),
+                },
             );
         });
         ui.add_space(9.);
@@ -1076,69 +1126,52 @@ impl App {
                     for column in cols.iter_mut() {
                         column.set_height(height);
                     }
-                    let folder_height = (height * 0.43).max(120.);
-                    egui::Frame::NONE
-                        .fill(cols[0].visuals().faint_bg_color)
-                        .corner_radius(7.)
-                        .inner_margin(10.)
-                        .show(&mut cols[0], |ui| {
-                            ui.strong("폴더");
-                            egui::ScrollArea::vertical()
-                                .id_salt("catalog_folders")
-                                .max_height((folder_height - 46.).max(70.))
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    let roots: Vec<_> = self
-                                        .catalog
-                                        .folders
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, f)| !f.deleted && f.parent.is_none())
-                                        .map(|(i, _)| i)
-                                        .collect();
-                                    if roots.is_empty() {
-                                        ui.label(
-                                            RichText::new(
-                                                "새 폴더를 만들고 아래 메모를 끌어 놓으세요",
-                                            )
-                                            .small()
-                                            .color(MUTED),
-                                        );
-                                    }
-                                    for f in roots {
-                                        self.catalog_folder_node(ui, f, 0);
-                                    }
-                                    let r = ui.add_sized(
-                                        [ui.available_width(), 28.],
-                                        egui::Label::new(
-                                            RichText::new("최상위로 폴더 이동")
-                                                .small()
-                                                .color(MUTED),
-                                        )
-                                        .sense(Sense::hover()),
-                                    );
-                                    self.catalog_folder_drop(ui, &r, None);
-                                });
-                        });
-                    cols[0].add_space(12.);
-                    cols[0].horizontal(|ui| {
-                        ui.strong("아직 분류하지 않은 메모");
-                        if !self.catalog.selected_many.is_empty() {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{}개 선택",
-                                    self.catalog.selected_many.len()
-                                ))
-                                .small()
-                                .color(ACCENT),
-                            );
-                        }
-                    });
-                    cols[0].label(
-                        RichText::new("Ctrl+클릭으로 여러 메모를 선택한 뒤 폴더로 드래그")
-                            .small()
-                            .color(MUTED),
+                    let folder_height = (height * 0.42).max(130.);
+                    let folder_count = self.catalog.folders.iter().filter(|f| !f.deleted).count();
+                    ui::section_header(
+                        &mut cols[0],
+                        crate::icons::Icon::Folder,
+                        "폴더",
+                        Some(folder_count),
                     );
+                    ui::card(&mut cols[0], |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("catalog_folders")
+                            .max_height((folder_height - 54.).max(70.))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let roots: Vec<_> = self
+                                    .catalog
+                                    .folders
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, f)| !f.deleted && f.parent.is_none())
+                                    .map(|(i, _)| i)
+                                    .collect();
+                                if roots.is_empty() {
+                                    ui::empty_state(
+                                        ui,
+                                        crate::icons::Icon::Folder,
+                                        "아직 폴더가 없습니다",
+                                        "‘+ 새 폴더’로 만든 뒤 메모를 끌어 놓으세요",
+                                    );
+                                }
+                                for f in roots {
+                                    self.catalog_folder_node(ui, f, 0);
+                                }
+                                let r = ui.add_sized(
+                                    [ui.available_width(), 26.],
+                                    egui::Label::new(
+                                        RichText::new("여기로 끌면 최상위 폴더가 됩니다")
+                                            .size(11.)
+                                            .color(ui::t(ui).faint),
+                                    )
+                                    .sense(Sense::hover()),
+                                );
+                                self.catalog_folder_drop(ui, &r, None);
+                            });
+                    });
+                    cols[0].add_space(14.);
                     let unfiled: Vec<_> = self
                         .data
                         .notes
@@ -1149,26 +1182,56 @@ impl App {
                         })
                         .map(|(i, _)| i)
                         .collect();
-                    egui::ScrollArea::vertical()
-                        .id_salt("catalog_unfiled")
-                        .max_height((height - folder_height - 90.).max(70.))
-                        .auto_shrink([false, false])
-                        .show(&mut cols[0], |ui| {
-                            if unfiled.is_empty() {
-                                ui.label(RichText::new("모든 메모를 분류했습니다").color(MUTED));
-                            }
-                            for i in unfiled {
-                                self.catalog_folder_note(ui, i);
-                            }
-                            let r = ui.add_sized(
-                                [ui.available_width(), 28.],
-                                egui::Label::new(
-                                    RichText::new("여기로 끌어 분류 해제").small().color(MUTED),
-                                )
-                                .sense(Sense::hover()),
+                    cols[0].horizontal(|ui| {
+                        ui::section_header(
+                            ui,
+                            crate::icons::Icon::Notes,
+                            "분류하지 않은 메모",
+                            Some(unfiled.len()),
+                        );
+                        if !self.catalog.selected_many.is_empty() {
+                            ui::chip(
+                                ui,
+                                &format!("{}개 선택", self.catalog.selected_many.len()),
+                                ui::t(ui).accent_soft,
+                                ACCENT,
                             );
-                            self.catalog_folder_drop(ui, &r, None);
-                        });
+                        }
+                    });
+                    ui::card(&mut cols[0], |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("catalog_unfiled")
+                            .max_height((height - folder_height - 112.).max(70.))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if unfiled.is_empty() {
+                                    ui::empty_state(
+                                        ui,
+                                        crate::icons::Icon::Notes,
+                                        "모든 메모를 분류했습니다",
+                                        "",
+                                    );
+                                }
+                                for i in unfiled {
+                                    self.catalog_folder_note(ui, i);
+                                }
+                                let r = ui.add_sized(
+                                    [ui.available_width(), 26.],
+                                    egui::Label::new(
+                                        RichText::new("여기로 끌면 폴더 분류가 해제됩니다")
+                                            .size(11.)
+                                            .color(ui::t(ui).faint),
+                                    )
+                                    .sense(Sense::hover()),
+                                );
+                                self.catalog_folder_drop(ui, &r, None);
+                            });
+                    });
+                    cols[0].add_space(4.);
+                    ui::hint(
+                        &mut cols[0],
+                        "Ctrl+클릭으로 여러 메모를 고른 뒤 폴더로 끌어 분류합니다",
+                    );
                     self.catalog_preview(&mut cols[1], height);
                 });
             },
@@ -1181,16 +1244,8 @@ impl App {
         }
         let selected = self.catalog.folder_selected == Some(f);
         let mut remove = false;
-        let inner = ui.horizontal(|ui| {
-            let icon = if self.catalog.folders[f].open {
-                crate::icons::Icon::Fold
-            } else {
-                crate::icons::Icon::ChevronRight
-            };
-            if crate::icons::icon_button(ui, icon, "폴더 펼치기 / 접기").clicked() {
-                self.catalog.folders[f].open = !self.catalog.folders[f].open;
-            }
-            if self.catalog.rename == Some(f) {
+        let inner = if self.catalog.rename == Some(f) {
+            ui.horizontal(|ui| {
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.catalog.folders[f].title)
                         .desired_width((ui.available_width() - 10.).max(80.)),
@@ -1202,38 +1257,106 @@ impl App {
                 if r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.catalog.rename = None;
                 }
-            } else {
-                let text = if selected {
-                    RichText::new(&self.catalog.folders[f].title)
-                        .strong()
-                        .color(ACCENT)
+            })
+            .response
+        } else {
+            let tone = ui::t(ui);
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.), Sense::hover());
+            let r = ui.interact(
+                rect,
+                ui.id().with(("folder_row", f)),
+                Sense::click_and_drag(),
+            );
+            if selected {
+                ui.painter().rect_filled(rect, 7., tone.accent_soft);
+            } else if r.hovered() {
+                ui.painter().rect_filled(rect, 7., tone.hover);
+            }
+            let chevron = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 13., rect.center().y),
+                Vec2::splat(18.),
+            );
+            crate::icons::paint_icon(
+                ui.painter(),
+                chevron.shrink(4.),
+                if self.catalog.folders[f].open {
+                    crate::icons::Icon::ChevronDown
                 } else {
-                    RichText::new(&self.catalog.folders[f].title)
-                };
-                let r = ui.add(egui::Label::new(text).sense(Sense::click_and_drag()));
-                if r.clicked() {
+                    crate::icons::Icon::ChevronRight
+                },
+                tone.muted,
+            );
+            crate::icons::paint_icon(
+                ui.painter(),
+                egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + 34., rect.center().y),
+                    Vec2::splat(15.),
+                ),
+                crate::icons::Icon::Folder,
+                if selected { ACCENT } else { tone.muted },
+            );
+            let count = self
+                .catalog
+                .assignments
+                .iter()
+                .filter(|(i, folder)| {
+                    **folder == f && **i < self.data.notes.len() && self.visible(**i)
+                })
+                .count();
+            ui.painter().text(
+                egui::pos2(rect.left() + 48., rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                shorten(&self.catalog.folders[f].title, 36),
+                egui::FontId::proportional(13.5),
+                if selected { ACCENT } else { tone.ink },
+            );
+            if count > 0 {
+                ui.painter().text(
+                    egui::pos2(rect.right() - 10., rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    count.to_string(),
+                    egui::FontId::proportional(11.5),
+                    tone.faint,
+                );
+            }
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    &self.catalog.folders[f].title,
+                )
+            });
+            if r.clicked() {
+                if r.interact_pointer_pos()
+                    .is_some_and(|p| chevron.expand(4.).contains(p))
+                {
+                    self.catalog.folders[f].open = !self.catalog.folders[f].open;
+                } else {
                     self.catalog.folder_selected = Some(f);
                 }
-                if r.double_clicked() {
+            }
+            if r.double_clicked() {
+                self.catalog.rename = Some(f);
+                self.catalog.rename_focus = true;
+            }
+            self.catalog
+                .drag_sources
+                .push((r.rect.intersect(ui.clip_rect()), FolderDrag::Folder(f)));
+            r.context_menu(|ui| {
+                if ui.button("이름 바꾸기").clicked() {
                     self.catalog.rename = Some(f);
                     self.catalog.rename_focus = true;
+                    ui.close_menu();
                 }
-                self.catalog
-                    .drag_sources
-                    .push((r.rect.intersect(ui.clip_rect()), FolderDrag::Folder(f)));
-                r.context_menu(|ui| {
-                    if ui.button("이름 바꾸기").clicked() {
-                        self.catalog.rename = Some(f);
-                        self.catalog.rename_focus = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("폴더 삭제 · 메모 유지").clicked() {
-                        remove = true;
-                        ui.close_menu();
-                    }
-                });
-            }
-        });
+                if ui.button("폴더 삭제 · 메모 유지").clicked() {
+                    remove = true;
+                    ui.close_menu();
+                }
+            });
+            r
+        };
+        let inner = egui::InnerResponse::new((), inner);
         self.catalog_folder_drop(ui, &inner.response, Some(f));
         if remove {
             self.catalog.remove_folder(f);
@@ -1271,42 +1394,24 @@ impl App {
     fn catalog_folder_note(&mut self, ui: &mut egui::Ui, i: usize) {
         let selected = self.catalog.selected_many.contains(&i) || self.catalog.selected == Some(i);
         let height = match self.desktop.row_spacing {
-            0 => 25.,
-            2 => 38.,
-            _ => 30.,
+            0 => 28.,
+            2 => 40.,
+            _ => 34.,
         };
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-        let r = ui.interact(
-            rect,
+        let n = &self.data.notes[i];
+        let meta = n
+            .date
+            .map(|d| d.format("%m.%d").to_string())
+            .unwrap_or_default();
+        let r = ui::list_row(
+            ui,
             ui.id().with(("folder_note", i)),
-            Sense::click_and_drag(),
+            selected,
+            Some(n.color),
+            &n.title,
+            &meta,
+            height,
         );
-        if selected || r.hovered() {
-            ui.painter().rect_filled(
-                rect,
-                5.,
-                if selected {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    ui.visuals().faint_bg_color
-                },
-            );
-        }
-        ui.painter().text(
-            rect.left_center() + Vec2::new(8., 0.),
-            egui::Align2::LEFT_CENTER,
-            shorten(&self.data.notes[i].title, 42),
-            egui::FontId::proportional(14.),
-            if selected {
-                ACCENT
-            } else {
-                ui.visuals().text_color()
-            },
-        );
-        r.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &self.data.notes[i].title)
-        });
         self.catalog_note_response(ui, &r, i, self.data.notes[i].date, false);
         r.context_menu(|ui| {
             if ui.button("독립 편집창 열기").clicked() {
@@ -1418,13 +1523,9 @@ impl App {
     }
 
     pub fn trash_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("휴지통");
-        ui.label(
-            RichText::new(
-                "삭제한 메모와 본문 탭을 복원하거나 영구 삭제합니다. 현재 실행 중에만 보관됩니다.",
-            )
-            .small()
-            .color(MUTED),
+        ui::hint(
+            ui,
+            "삭제한 메모와 본문 탭을 복원하거나 영구 삭제합니다 · 현재 실행 중에만 보관됩니다",
         );
         ui.add_space(10.);
         let notes: Vec<_> = self
@@ -1443,15 +1544,24 @@ impl App {
             .filter(|(_, n)| !n.purged)
             .flat_map(|(i, n)| (0..n.document.trash.len()).map(move |t| TableRow::Tab(i, t)))
             .collect();
-        ui.label(
-            RichText::new(format!("메모 {}개 · 본문 탭 {}개", notes.len(), tabs.len()))
-                .small()
-                .color(MUTED),
+        ui::section_header(
+            ui,
+            crate::icons::Icon::Trash,
+            "휴지통",
+            Some(notes.len() + tabs.len()),
         );
         let rows: Vec<_> = notes.into_iter().chain(tabs).collect();
         if rows.is_empty() {
-            ui.add_space(24.);
-            ui.label("휴지통이 비어 있습니다");
+            ui.add_space(8.);
+            ui::card(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui::empty_state(
+                    ui,
+                    crate::icons::Icon::Trash,
+                    "휴지통이 비어 있습니다",
+                    "삭제한 메모와 본문 탭이 여기에 모입니다",
+                );
+            });
         } else {
             let height = panel_height(ui);
             let rect =
@@ -1505,23 +1615,27 @@ impl App {
         let mut cancel = false;
         // A modal prevents list changes from shifting the selected tab's index
         // while the user reviews this irreversible in-memory action.
-        let response = egui::Modal::new(egui::Id::new("purge_deleted_tab")).show(ctx, |ui| {
-            ui.set_max_width(380.);
-            ui.heading("본문 탭 영구 삭제");
-            ui.label(title);
-            ui.add_space(8.);
-            ui.label("이 탭의 본문과 표·이미지를 영구 삭제할까요? 삭제 후에는 복원할 수 없습니다.");
-            ui.add_space(12.);
-            ui.horizontal(|ui| {
-                cancel = ui.button("취소").clicked();
-                confirmed = ui
-                    .button(RichText::new("영구 삭제").color(ACCENT))
-                    .clicked();
-            });
-        });
+        let mut open = true;
+        ui::dialog(
+            ctx,
+            "purge_deleted_tab",
+            "본문 탭 영구 삭제",
+            [400., 210.],
+            true,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new(title).strong().size(15.));
+                ui.add_space(4.);
+                ui::hint(
+                    ui,
+                    "이 탭의 본문과 표·이미지를 영구 삭제합니다. 삭제 후에는 복원할 수 없습니다.",
+                );
+                (confirmed, cancel) = ui::dialog_buttons(ui, "영구 삭제", "취소");
+            },
+        );
         if confirmed {
             self.catalog_confirm_tab_purge();
-        } else if cancel || response.should_close() {
+        } else if cancel || !open {
             self.catalog.purge_tab = None;
         }
     }
@@ -1545,23 +1659,37 @@ impl App {
         let mut open = true;
         let mut apply = false;
         let mut target = vec![];
-        egui::Window::new("찾아 바꾸기")
-            .id(egui::Id::new("catalog_replace"))
-            .open(&mut open)
-            .default_width(420.)
-            .show(ctx, |ui| {
-                ui.label("찾을 내용");
-                ui.text_edit_singleline(&mut self.catalog.replace_find);
-                ui.label("바꿀 내용");
-                ui.text_edit_singleline(&mut self.catalog.replace_with);
+        ui::dialog(
+            ctx,
+            "catalog_replace",
+            "찾아 바꾸기",
+            [420., 330.],
+            false,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new("찾아 바꾸기").strong().size(15.));
+                ui.add_space(8.);
+                ui::field(ui, "찾을 내용", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.catalog.replace_find)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8, 5)),
+                    );
+                });
+                ui::field(ui, "바꿀 내용", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.catalog.replace_with)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8, 5)),
+                    );
+                });
                 ui.add_space(6.);
-                ui.horizontal_wrapped(|ui| {
-                    for (i, name) in ["현재 메모", "선택 프로젝트", "전체 메모"]
-                        .iter()
-                        .enumerate()
-                    {
-                        ui.selectable_value(&mut self.catalog.replace_scope, i, *name);
-                    }
+                ui::field(ui, "범위", |ui| {
+                    ui::segmented(
+                        ui,
+                        &mut self.catalog.replace_scope,
+                        &["현재 메모", "선택 프로젝트", "전체 메모"],
+                    );
                 });
                 target = self.catalog_replace_targets();
                 ui.label(
@@ -1572,19 +1700,26 @@ impl App {
                     .small()
                     .color(MUTED),
                 );
-                if ui
-                    .add_enabled(
-                        !target.is_empty(),
-                        egui::Button::new("위 범위에서 모두 바꾸기"),
-                    )
-                    .clicked()
-                {
-                    apply = true;
-                }
+                ui.add_space(6.);
                 if !self.catalog.replace_message.is_empty() {
-                    ui.label(&self.catalog.replace_message);
+                    ui.label(RichText::new(&self.catalog.replace_message).color(ACCENT));
                 }
-            });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            !target.is_empty(),
+                            egui::Button::new(
+                                RichText::new("모두 바꾸기").color(Color32::WHITE).strong(),
+                            )
+                            .fill(ACCENT),
+                        )
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                });
+            },
+        );
         self.catalog.replace_open = open;
         if apply {
             self.catalog_apply_replacement(&target);
@@ -1840,24 +1975,37 @@ mod tests {
     }
 
     #[test]
-    fn narrow_table_scroll_can_reach_delete_column_without_moving_the_preview() {
+    fn the_table_shrinks_with_the_list_and_scrolls_only_when_too_narrow() {
         let mut a = representative_table_app();
         let ctx = egui::Context::default();
-        a.catalog.table_offset = f32::MAX;
-        render_table_layout(&mut a, &ctx, 1100.);
-        let out = render_table_layout(&mut a, &ctx, 1100.);
+        // A typical window: every column fits without horizontal scrolling.
+        render_table_layout(&mut a, &ctx, 1400.);
+        let out = render_table_layout(&mut a, &ctx, 1400.);
         let visible = a.catalog.table_viewport_width;
-        assert!(visible > 350. && visible < 650.);
-        assert!(a.catalog.table_offset > 200.);
+        assert!(
+            (a.catalog.table_width - visible).abs() < 20.,
+            "{} vs {visible}",
+            a.catalog.table_width
+        );
+        let header = text_rect(&out, "생성일", 1400.);
+        let created = text_rect(&out, "260102", 1400.);
+        assert!((header.left() - created.left()).abs() < 1.);
+        // Widening the preview narrows the list instead of hiding columns.
+        let before = a.catalog.table_width;
+        a.catalog.preview_width += 120.;
+        render_table_layout(&mut a, &ctx, 1400.);
+        assert!(a.catalog.table_width < before);
+        // Below the narrowest table the delete column is still reachable.
+        a.catalog.table_offset = f32::MAX;
+        render_table_layout(&mut a, &ctx, 700.);
+        render_table_layout(&mut a, &ctx, 700.);
+        let visible = a.catalog.table_viewport_width;
         let last = table_cells(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             Vec2::new(TABLE_WIDTH, 48.),
         ))[7];
         assert!(last.center().x - a.catalog.table_offset > 0.);
         assert!(last.right() - a.catalog.table_offset <= visible + 1.);
-        let header = text_rect(&out, "생성일", 780.);
-        let created = text_rect(&out, "260102", 780.);
-        assert!((header.left() - created.left()).abs() < 1.);
     }
     #[test]
     fn folder_drop_uses_real_rendered_note_and_folder_bounds() {

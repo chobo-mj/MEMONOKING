@@ -18,6 +18,7 @@ pub struct Note {
     pub completed: Option<NaiveDateTime>,
     pub starred: bool,
     pub recurring: bool,
+    pub repeat: crate::repeat::Repeat,
     pub project: Option<usize>,
     pub parents: Vec<usize>,
     pub created: NaiveDateTime,
@@ -53,6 +54,7 @@ impl Note {
             completed: None,
             starred: false,
             recurring: false,
+            repeat: Default::default(),
             project: None,
             parents: vec![],
             created: Local::now().naive_local(),
@@ -139,7 +141,10 @@ impl Note {
     }
     pub fn occurs(&self, d: NaiveDate) -> bool {
         self.date.is_some_and(|start| {
-            d >= start && d < start + Duration::days(self.duration.max(1) as i64)
+            let len = self.duration.max(1) as i64;
+            (d >= start && d < start + Duration::days(len))
+                || (!self.repeat.is_none()
+                    && (0..len).any(|k| self.repeat.matches(start, d - Duration::days(k))))
         })
     }
     pub fn done_on(&self, d: Option<NaiveDate>) -> bool {
@@ -259,6 +264,22 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_repeating_note_occurs_on_each_repetition() {
+        let start = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut n = Note::new("회의", Some(start), 0);
+        assert!(!n.occurs(start + Duration::days(7)));
+        n.repeat = crate::repeat::Repeat::Weekly {
+            every: 1,
+            days: crate::repeat::bit(chrono::Weekday::Wed),
+        };
+        assert!(n.occurs(start));
+        assert!(n.occurs(start + Duration::days(7)));
+        assert!(!n.occurs(start + Duration::days(8)));
+        // A two-day span repeats as a whole.
+        n.duration = 2;
+        assert!(n.occurs(start + Duration::days(8)));
+    }
     #[test]
     fn nesting_rejects_cycles() {
         let mut w = Workspace::sample(Local::now().date_naive());

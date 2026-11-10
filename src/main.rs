@@ -10,28 +10,33 @@ mod media;
 mod model;
 mod native_window;
 mod refinements;
+mod repeat;
+mod schedule;
 mod studio;
+mod ui;
 mod views;
+mod win_style;
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use model::{Note, Workspace};
 const PALETTE: [Color32; 10] = [
-    Color32::from_rgb(246, 211, 103),
-    Color32::from_rgb(239, 161, 149),
-    Color32::from_rgb(176, 202, 160),
-    Color32::from_rgb(151, 194, 215),
-    Color32::from_rgb(181, 165, 213),
-    Color32::from_rgb(231, 178, 203),
-    Color32::from_rgb(225, 187, 142),
-    Color32::from_rgb(145, 205, 185),
-    Color32::from_rgb(185, 190, 195),
-    Color32::from_rgb(228, 222, 204),
+    Color32::from_rgb(255, 240, 166),
+    Color32::from_rgb(255, 216, 186),
+    Color32::from_rgb(255, 207, 214),
+    Color32::from_rgb(226, 214, 250),
+    Color32::from_rgb(203, 226, 250),
+    Color32::from_rgb(204, 236, 214),
+    Color32::from_rgb(224, 232, 196),
+    Color32::from_rgb(240, 228, 206),
+    Color32::from_rgb(228, 228, 226),
+    Color32::from_rgb(250, 250, 248),
 ];
 const NO_PROJECT: usize = usize::MAX;
-const INK: Color32 = Color32::from_rgb(48, 47, 44);
-const MUTED: Color32 = Color32::from_rgb(113, 114, 116);
-const ACCENT: Color32 = Color32::from_rgb(184, 72, 53);
+const INK: Color32 = Color32::from_rgb(44, 43, 40);
+const MUTED: Color32 = Color32::from_rgb(120, 119, 115);
+const ACCENT: Color32 = ui::ACCENT;
+pub use ui::main_viewport;
 #[derive(Clone)]
 struct NoteDrag;
 struct App {
@@ -66,6 +71,8 @@ struct App {
     journal_month: bool,
     journal_date: String,
     toast: String,
+    toast_shown: (String, f64),
+    arrange: Option<studio::Arrange>,
     date_edit: String,
     time_edit: String,
     completion_edit: String,
@@ -155,6 +162,8 @@ impl App {
             journal_month: false,
             journal_date: today.to_string(),
             toast: String::new(),
+            toast_shown: (String::new(), 0.),
+            arrange: None,
             date_edit: String::new(),
             time_edit: String::new(),
             completion_edit: String::new(),
@@ -170,76 +179,13 @@ impl App {
         }
     }
     fn theme(&self, ctx: &egui::Context) {
-        let mut v = if self.dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        v.panel_fill = if self.dark {
-            Color32::from_rgb(29, 30, 29)
-        } else {
-            Color32::from_rgb(255, 254, 252)
-        };
-        v.override_text_color = Some(if self.dark {
-            Color32::from_rgb(232, 231, 225)
-        } else {
-            INK
-        });
-        v.selection.bg_fill = if self.dark {
-            Color32::from_rgb(80, 53, 45)
-        } else {
-            Color32::from_rgb(252, 236, 225)
-        };
-        v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
-        v.widgets.active.weak_bg_fill = v.selection.bg_fill;
-        v.window_fill = v.panel_fill;
-        v.window_corner_radius = egui::CornerRadius::same(10);
-        v.window_stroke = egui::Stroke::new(
-            1.0_f32,
-            if self.dark {
-                Color32::from_gray(65)
-            } else {
-                Color32::from_rgb(224, 225, 227)
-            },
-        );
-        v.widgets.inactive.weak_bg_fill = if self.dark {
-            Color32::from_rgb(42, 43, 41)
-        } else {
-            Color32::from_rgb(244, 244, 240)
-        };
-        v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        v.widgets.hovered.weak_bg_fill = if self.dark {
-            Color32::from_rgb(55, 55, 51)
-        } else {
-            Color32::from_rgb(235, 236, 230)
-        };
-        v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
-        v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
-        ctx.set_visuals(v);
         let selected = egui::FontFamily::Name(self.desktop.font.clone().into());
         let family = if ctx.fonts(|f| f.families().contains(&selected)) {
             selected
         } else {
             egui::FontFamily::Proportional
         };
-        ctx.style_mut(|s| {
-            s.spacing.item_spacing = Vec2::new(8., 8.);
-            s.spacing.button_padding = Vec2::new(9., 6.);
-            s.text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
-            s.text_styles
-                .insert(egui::TextStyle::Button, egui::FontId::proportional(15.));
-            s.text_styles
-                .insert(egui::TextStyle::Small, egui::FontId::proportional(12.));
-            s.text_styles
-                .insert(egui::TextStyle::Heading, egui::FontId::proportional(25.));
-            for (style, font) in &mut s.text_styles {
-                font.family = family.clone();
-                if *style == egui::TextStyle::Body {
-                    font.size = self.desktop.font_size * 4. / 3.;
-                }
-            }
-        });
+        ui::apply(ctx, self.dark, family, self.desktop.font_size * 4. / 3.);
     }
     fn apply_shortcuts(&mut self) {
         let parsed = self
@@ -331,6 +277,9 @@ impl App {
         self.studio.open(i, self.extra.edit_occurrence);
         if let Some(w) = self.studio.windows.get_mut(&i) {
             w.schedule_start = self.data.notes[i].date;
+            if self.desktop.always_sticker {
+                w.sticker();
+            }
         }
         self.data.notes[i].fold = 0;
         self.edit_error.clear();
@@ -366,14 +315,11 @@ impl eframe::App for App {
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.theme(ctx);
-        self.drag_input(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         while let Ok(e) = GlobalHotKeyEvent::receiver().try_recv() {
             if e.state == HotKeyState::Pressed {
                 if self.registered.first().is_some_and(|h| h.id() == e.id) {
                     self.capture = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 } else if self.registered.get(2).is_some_and(|h| h.id() == e.id) {
                     self.new_sticker();
                 } else if self.registered.get(1).is_some_and(|h| h.id() == e.id) {
@@ -389,12 +335,67 @@ impl eframe::App for App {
                 }
             }
         }
+        // The host itself paints nothing.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ctx, |_| {});
+        self.main_window(ctx);
+        if self.floating {
+            let mut open = true;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("calendar"),
+                egui::ViewportBuilder::default()
+                    .with_title("MEMONOKING · 캘린더")
+                    .with_inner_size([860., 760.])
+                    .with_min_inner_size([480., 420.]),
+                |ctx, _| {
+                    self.theme(ctx);
+                    self.drag_input(ctx);
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        open = false;
+                    }
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(ctx.style().visuals.panel_fill)
+                                .inner_margin(egui::Margin::symmetric(20, 16)),
+                        )
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| self.calendar(ui));
+                        });
+                },
+            );
+            self.floating = open;
+        }
+        self.apply_arrangement(ctx);
+        self.detached_note(ctx);
+        self.global_dialogs(ctx);
+        self.extra_windows(ctx);
+        self.desktop_dialogs(ctx);
+    }
+}
+impl App {
+    fn main_window(&mut self, root: &egui::Context) {
+        let builder = egui::ViewportBuilder::default()
+            .with_title("MEMONOKING")
+            .with_inner_size([1440., 900.])
+            .with_min_inner_size([980., 640.])
+            .with_maximized(true);
+        root.show_viewport_immediate(main_viewport(), builder, |ctx, _| {
+            self.theme(ctx);
+            self.drag_input(ctx);
+            if ctx.input(|i| i.viewport().close_requested()) {
+                root.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+            }
+            self.main_shortcuts(ctx);
+            self.main_ui(ctx);
+            self.picker_window(ctx);
+            self.scope_dialog(ctx);
+            self.toast_overlay(ctx);
+        });
+    }
+    fn main_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.editor = false;
-            self.capture = false;
-            self.settings = false;
-            self.extra.search_options = false;
-            self.extra.project_manager = false;
             self.extra.picker = None;
             self.link_source = None;
         }
@@ -412,302 +413,388 @@ impl eframe::App for App {
             let i = self.catalog.selected.unwrap_or(self.active);
             self.data.notes[i].topmost = !self.data.notes[i].topmost;
         }
+    }
+    fn main_ui(&mut self, ctx: &egui::Context) {
+        let tone = ui::tone(self.dark);
         if self.sidebar {
             egui::SidePanel::left("sidebar")
-                .exact_width(220.)
+                .exact_width(236.)
+                .resizable(false)
+                .show_separator_line(false)
                 .frame(
                     egui::Frame::NONE
-                        .fill(if self.dark {
-                            Color32::from_rgb(25, 26, 25)
-                        } else {
-                            Color32::from_rgb(249, 247, 244)
-                        })
-                        .inner_margin(16.),
+                        .fill(tone.sidebar)
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 12,
+                            top: 14,
+                            bottom: 12,
+                        }),
                 )
+                .show(ctx, |ui| self.sidebar_ui(ui));
+        }
+        if self.split && self.page == 0 {
+            egui::SidePanel::right("split")
+                .default_width(560.)
+                .min_width(380.)
+                .max_width(ctx.screen_rect().width() * 0.62)
+                .resizable(true)
+                .show_separator_line(true)
+                .frame(egui::Frame::NONE.fill(tone.bg).inner_margin(egui::Margin {
+                    left: 20,
+                    right: 20,
+                    top: 18,
+                    bottom: 8,
+                }))
                 .show(ctx, |ui| {
-                    ui.add_space(12.);
-                    ui.strong("M  MEMONOKING");
-                    ui.label(RichText::new("나의 메모와 하루").small().color(MUTED));
-                    ui.add_space(20.);
-                    if ui
-                        .add_sized(
-                            [188., 34.],
-                            egui::Button::new(RichText::new("+ 작업 추가").color(ACCENT)),
-                        )
-                        .clicked()
-                    {
-                        self.capture = true;
+                    egui::ScrollArea::vertical()
+                        .id_salt("split_calendar")
+                        .show(ui, |ui| self.calendar(ui));
+                });
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(tone.bg).inner_margin(egui::Margin {
+                left: 28,
+                right: 24,
+                top: 18,
+                bottom: 8,
+            }))
+            .show(ctx, |ui| {
+                self.page_bar(ui);
+                ui.add_space(10.);
+                if self.page == 4 || (self.page == 0 && !self.split) {
+                    if self.page == 4 {
+                        self.catalog_ui(ui);
+                    } else {
+                        self.agenda(ui, 0);
                     }
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.search)
-                                .id_salt("global_search")
-                                .hint_text("제목 · 본문 검색"),
-                        )
-                        .changed()
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("page_scroll", self.page))
+                        .show(ui, |ui| {
+                            ui.set_min_width((ui.available_width() - 8.).max(200.));
+                            match self.page {
+                                1 => self.wiki(ui),
+                                0 | 2 | 3 => self.agenda(ui, self.page),
+                                5 => self.calendar(ui),
+                                6 => self.utilities(ui),
+                                _ => self.collections(ui),
+                            }
+                        });
+                }
+            });
+    }
+    /// Page title on the left and global window actions on the right.
+    fn page_bar(&mut self, ui: &mut egui::Ui) {
+        let title = if self.extra.search_mode && matches!(self.page, 0 | 2 | 3) {
+            "검색 결과"
+        } else {
+            PAGES
+                .iter()
+                .find(|(p, _, _)| *p == self.page)
+                .map(|(_, name, _)| *name)
+                .unwrap_or("MEMONOKING")
+        };
+        ui.horizontal(|ui| {
+            ui.set_min_height(34.);
+            if !self.sidebar
+                && icons::icon_button(ui, icons::Icon::Sidebar, "사이드바 열기").clicked()
+            {
+                self.sidebar = true;
+            }
+            ui.label(RichText::new(title).size(20.).strong());
+            if self.extra.search_mode {
+                ui.add_space(6.);
+                if ui::pill(
+                    ui,
+                    true,
+                    &format!("‘{}’ 검색 해제", shorten(&self.search, 12)),
+                )
+                .clicked()
+                {
+                    self.search.clear();
+                    self.extra.search_mode = false;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::icon_button(ui, icons::Icon::Detach, "캘린더 분리창").clicked() {
+                    self.floating = true;
+                }
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::StickyPlus,
+                    &format!("새 스티커 · {}", self.shortcut_label(2)),
+                )
+                .clicked()
+                {
+                    self.new_sticker();
+                }
+                if self.page == 0 {
+                    let label = if self.split {
+                        "캘린더 닫기 · 자세히 보기"
+                    } else {
+                        "캘린더 함께 보기"
+                    };
+                    if icons::toggle_icon(ui, icons::Icon::Calendar, label, self.split).clicked() {
+                        self.split = !self.split;
+                    }
+                }
+            });
+        });
+    }
+    fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.), egui::Sense::hover());
+            ui.painter().rect_filled(mark, 6., ACCENT);
+            ui.painter().text(
+                mark.center(),
+                egui::Align2::CENTER_CENTER,
+                "M",
+                egui::FontId::proportional(13.),
+                Color32::WHITE,
+            );
+            ui.label(RichText::new("MEMONOKING").strong().size(14.));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::icon_button(ui, icons::Icon::Sidebar, "사이드바 접기").clicked() {
+                    self.sidebar = false;
+                }
+            });
+        });
+        ui.add_space(12.);
+        ui.horizontal(|ui| {
+            let width = ui.available_width() - 34.;
+            let r = ui::search_field(ui, &mut self.search, "global_search", "검색", width);
+            if r.changed() {
+                self.extra.search_mode = !self.search.is_empty();
+                if self.extra.search_mode && !matches!(self.page, 0 | 2 | 3) {
+                    self.page = 0;
+                }
+            }
+            if icons::toggle_icon(
+                ui,
+                icons::Icon::Filter,
+                "상세 검색",
+                self.extra.search_options,
+            )
+            .clicked()
+            {
+                self.extra.search_options = !self.extra.search_options;
+            }
+        });
+        ui.add_space(8.);
+        if studio::nav_button(ui, "빠른 메모", false, icons::Icon::PlusCircle, None, true).clicked()
+        {
+            self.capture = true;
+        }
+        ui.add_space(6.);
+        let today = Local::now().date_naive();
+        let today_count = self
+            .data
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| self.visible(*i) && n.occurs(today) && !n.done_on(Some(today)))
+            .count();
+        for (page, name, icon) in PAGES {
+            let badge = (page == 2 && today_count > 0).then(|| today_count.to_string());
+            if studio::nav_button(ui, name, self.page == page, icon, badge, false).clicked() {
+                self.page = page;
+            }
+        }
+        ui.add_space(18.);
+        ui.horizontal(|ui| {
+            ui.add_space(8.);
+            ui::caption(ui, "프로젝트");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::small_icon(ui, icons::Icon::Settings, "프로젝트 관리").clicked() {
+                    self.extra.project_manager = true;
+                }
+            });
+        });
+        ui.add_space(2.);
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar_projects")
+            .max_height((ui.available_height() - 44.).max(60.))
+            .show(ui, |ui| {
+                let mut any = false;
+                for (i, p) in self.data.projects.iter().enumerate() {
+                    if self.extra.hidden_projects.contains(&i)
+                        || self.extra.deleted_projects.contains(&i)
                     {
-                        self.extra.search_mode = !self.search.is_empty();
-                        if self.extra.search_mode {
+                        continue;
+                    }
+                    any = true;
+                    let selected = self.project_filter == Some(i);
+                    if studio::project_button(ui, p, selected).clicked() {
+                        self.project_filter = if selected { None } else { Some(i) };
+                        if !matches!(self.page, 0 | 2 | 3) {
                             self.page = 0;
                         }
                     }
-                    ui.horizontal(|ui| {
-                        if ui.small_button("상세 옵션").clicked() {
-                            self.extra.search_options = !self.extra.search_options;
-                        }
-                        if ui.small_button("검색 해제").clicked() {
-                            self.search.clear();
-                            self.extra.search_mode = false;
-                        }
-                    });
-                    ui.add_space(12.);
-                    egui::ScrollArea::vertical()
-                        .max_height((ui.available_height() - 80.).max(100.))
-                        .show(ui, |ui| {
-                            for (i, name) in [
-                                "내 작업실",
-                                "나만의 위키",
-                                "오늘",
-                                "다음",
-                                "전체메모",
-                                "캘린더",
-                                "편의기능",
-                            ]
-                            .iter()
-                            .enumerate()
-                            {
-                                if studio::nav_button(
-                                    ui,
-                                    name,
-                                    self.page == i,
-                                    [
-                                        icons::Icon::Sticky,
-                                        icons::Icon::Folder,
-                                        icons::Icon::Calendar,
-                                        icons::Icon::ChevronRight,
-                                        icons::Icon::Folder,
-                                        icons::Icon::Calendar,
-                                        icons::Icon::Settings,
-                                    ][i],
-                                )
-                                .clicked()
-                                {
-                                    self.page = i;
-                                }
-                            }
-                            ui.add_space(20.);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("프로젝트").small().color(MUTED));
-                                if ui.small_button("관리").clicked() {
-                                    self.extra.project_manager = true;
-                                }
-                            });
-                            for (i, p) in self.data.projects.iter().enumerate() {
-                                if self.extra.hidden_projects.contains(&i)
-                                    || self.extra.deleted_projects.contains(&i)
-                                {
-                                    continue;
-                                }
-                                if ui
-                                    .selectable_label(
-                                        self.project_filter == Some(i),
-                                        format!("# {p}"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.project_filter = Some(i);
-                                    self.page = 0;
-                                }
-                            }
-                            ui.add_space(14.);
-                            ui.label(
-                                RichText::new("내 메모 · 날짜로 드래그")
-                                    .small()
-                                    .color(MUTED),
-                            );
-                            for i in 0..self.data.notes.len() {
-                                if !self.visible(i)
-                                    || (!self.search.is_empty()
-                                        && !self.data.notes[i].title.contains(&self.search)
-                                        && (self.data.notes[i].locked
-                                            || !self.data.notes[i]
-                                                .document
-                                                .plain_text(&self.data.notes[i].body)
-                                                .contains(&self.search)))
-                                {
-                                    continue;
-                                }
-                                let r = ui.add(
-                                    egui::Label::new(shorten(&self.data.notes[i].title, 15))
-                                        .sense(egui::Sense::click_and_drag()),
-                                );
-                                r.dnd_set_drag_payload(NoteDrag);
-                                self.drag_source(ui, &r, i, false);
-                                if r.clicked() {
-                                    self.open_note(i);
-                                }
-                            }
-                        });
-                    ui.separator();
-                    if ui.button("⚙ 설정 · 단축키").clicked() {
-                        self.settings = true;
-                    }
-                    ui.label(
-                        RichText::new("미리보기 · 종료하면 초기화")
-                            .small()
-                            .color(MUTED),
-                    );
-                });
-        }
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.small_button("☰").clicked() {
-                    self.sidebar = !self.sidebar;
                 }
-                ui.label(RichText::new("개인 작업 공간").small().color(MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::icon_button(ui, icons::Icon::Help, "작업 공간 도움말").clicked()
-                    {
-                        self.studio.help = !self.studio.help;
-                    }
-                    if ui
-                        .button("스티커 노트")
-                        .on_hover_text(format!("새 스티커 · {}", self.shortcut_label(2)))
-                        .clicked()
-                    {
-                        self.new_sticker();
-                    }
-                    if ui.button("캘린더 분리 ↗").clicked() {
-                        self.floating = true;
-                    }
-                    if ui.button("+ 빠른 메모").clicked() {
-                        self.capture = true;
-                    }
-                });
+                if !any {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.);
+                        ui::hint(ui, "본문 첫 줄에 #이름 을 입력하면 생성됩니다");
+                    });
+                }
             });
-        });
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.label(RichText::new(&self.toast).small().color(MUTED));
-        });
-        if self.split && self.page == 0 {
-            egui::SidePanel::right("split")
-                .default_width(550.)
-                .min_width(360.)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.add_space(15.);
-                        self.calendar(ui);
-                    });
-                });
-        }
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(20.);
-            if self.page == 4 {
-                self.catalog_ui(ui);
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt(("page_scroll", self.page))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.);
-                            ui.vertical(|ui| {
-                                ui.set_min_width((ui.available_width() - 25.).max(200.));
-                                match self.page {
-                                    1 => self.wiki(ui),
-                                    0 | 2 | 3 => self.agenda(ui, self.page),
-                                    5 => self.calendar(ui),
-                                    6 => self.utilities(ui),
-                                    _ => self.collections(ui),
-                                }
-                            });
-                        });
-                    });
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            if studio::nav_button(ui, "설정", false, icons::Icon::Settings, None, false).clicked()
+            {
+                self.settings = true;
+                ui::raise(ui.ctx(), "settings");
             }
         });
+    }
+    fn toast_overlay(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if self.toast.is_empty() {
+            return;
+        }
+        if self.toast_shown.0 != self.toast {
+            self.toast_shown = (self.toast.clone(), now);
+        }
+        let age = now - self.toast_shown.1;
+        if age > 3.2 {
+            self.toast.clear();
+            return;
+        }
+        let alpha = ((3.2 - age) / 0.4).clamp(0., 1.) as f32;
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("toast"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(egui::pos2(screen.center().x, screen.bottom() - 28.))
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(
+                        40,
+                        39,
+                        37,
+                        (235. * alpha) as u8,
+                    ))
+                    .corner_radius(8.)
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&self.toast)
+                                .color(Color32::from_white_alpha((255. * alpha) as u8)),
+                        );
+                    });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    /// Dialogs that belong to the application rather than to one window.
+    fn global_dialogs(&mut self, ctx: &egui::Context) {
         if self.capture {
             self.capture_project_header();
         }
         let mut open = self.capture;
-        egui::Window::new("빠른 메모")
-            .open(&mut open)
-            .default_width(430.)
-            .show(ctx, |ui| {
-                ui.label("떠오른 생각이나 새 할 일을 적으세요");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.capture_text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(5),
+        ui::dialog(
+            ctx,
+            "capture",
+            "빠른 메모",
+            [460., 300.],
+            true,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new("빠른 메모").size(16.).strong());
+                ui::hint(
+                    ui,
+                    "첫 줄은 제목이 됩니다 · #프로젝트명 으로 시작하면 분류됩니다",
                 );
-                if ui.button("수집함에 추가").clicked() && !self.capture_text.trim().is_empty()
-                {
+                ui.add_space(8.);
+                let r = ui.add(
+                    egui::TextEdit::multiline(&mut self.capture_text)
+                        .id_salt("capture_text")
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6)
+                        .margin(egui::Margin::same(10))
+                        .hint_text("떠오른 생각이나 할 일을 적으세요"),
+                );
+                if !r.has_focus() && self.capture_text.is_empty() {
+                    r.request_focus();
+                }
+                let submit = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+                let (save, _) = ui::dialog_buttons(ui, "추가  Ctrl+Enter", "");
+                if (save || submit) && !self.capture_text.trim().is_empty() {
                     let i = self.data.notes.len();
                     let mut n = Note::new(
                         self.capture_text.lines().next().unwrap_or("새 메모"),
                         None,
                         i,
                     );
-                    n.body = self.capture_text.clone();
+                    n.body = self
+                        .capture_text
+                        .split_once('\n')
+                        .map(|(_, rest)| rest.to_owned())
+                        .unwrap_or_default();
                     n.project = self.extra.capture_project.take();
                     self.data.notes.push(n);
                     self.consume_project_header(i);
                     self.capture_text.clear();
-                    self.toast = "수집함 보드에 추가했습니다".into();
+                    self.toast = "메모를 추가했습니다".into();
                 }
-            });
+            },
+        );
         self.capture = open;
         let mut open = self.settings;
-        egui::Window::new("설정")
-            .open(&mut open)
-            .default_width(780.)
-            .show(ctx, |ui| self.ppt_settings(ui));
+        ui::dialog(
+            ctx,
+            "settings",
+            "설정",
+            [860., 620.],
+            false,
+            &mut open,
+            |ui| self.ppt_settings(ui),
+        );
         self.settings = open;
-        if self.studio.help {
-            let mut open = true;
-            egui::Window::new("작업 공간 도움말")
-                .open(&mut open)
-                .default_width(380.)
-                .show(ctx, |ui| {
-                    ui.heading("내 메모, 내 방식으로");
-                    ui.label("메모 제목을 눌러 독립 편집창을 여세요.");
-                    ui.label("스티커 노트는 제목과 본문만 간결하게 보여줍니다.");
-                    ui.label("메모 제목을 달력 날짜에 끌면 일정이 지정됩니다.");
-                    ui.label("수집함에서 관계를 연결하고 위키에서 지식을 분류하세요.");
-                    ui.separator();
-                    for (i, name) in ["빠른 메모", "분리 캘린더", "새 스티커"].iter().enumerate()
-                    {
-                        ui.label(format!("{name} · {}", self.shortcut_label(i)));
-                    }
-                    ui.label("단축키는 설정에서 바꿀 수 있습니다.");
-                });
-            self.studio.help = open;
-        }
-        if self.floating {
-            let mut open = true;
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("calendar"),
-                egui::ViewportBuilder::default()
-                    .with_title("MEMONOKING · 캘린더")
-                    .with_inner_size([820., 760.])
-                    .with_min_inner_size([480., 420.]),
-                |ctx, _| {
-                    self.theme(ctx);
-                    self.drag_input(ctx);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        open = false;
-                    }
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| self.calendar(ui));
+        let mut open = self.studio.help;
+        ui::dialog(
+            ctx,
+            "help",
+            "도움말",
+            [420., 380.],
+            false,
+            &mut open,
+            |ui| {
+                ui.label(RichText::new("MEMONOKING 사용법").size(16.).strong());
+                ui.add_space(8.);
+                for line in [
+                    "메모 제목을 누르면 편집창이 열립니다.",
+                    "메모를 달력 날짜로 끌면 일정이 지정됩니다.",
+                    "스티커를 우클릭하면 바탕화면 정렬 메뉴가 나옵니다.",
+                    "접기: 스티커 → 제목 한 줄 → 색상 상자 · 상자를 두 번 클릭하면 복원",
+                    "이미지와 표는 클립보드에서 본문에 붙여 넣습니다.",
+                ] {
+                    ui.label(format!("·  {line}"));
+                }
+                ui.add_space(10.);
+                ui::divider(ui);
+                ui.add_space(10.);
+                for (i, name) in ["빠른 메모", "분리 캘린더", "새 스티커"].iter().enumerate()
+                {
+                    ui::field(ui, name, |ui| {
+                        ui.monospace(self.shortcut_label(i));
                     });
-                },
-            );
-            self.floating = open;
-        }
-        self.detached_note(ctx);
-        self.extra_windows(ctx);
-        self.desktop_dialogs(ctx);
+                }
+            },
+        );
+        self.studio.help = open;
     }
 }
+/// Navigation pages: (page index, label, icon) in display order.
+const PAGES: [(usize, &str, icons::Icon); 7] = [
+    (0, "내 작업실", icons::Icon::Home),
+    (2, "오늘", icons::Icon::Today),
+    (3, "다음", icons::Icon::Upcoming),
+    (5, "캘린더", icons::Icon::Calendar),
+    (4, "전체메모", icons::Icon::Notes),
+    (1, "나만의 위키", icons::Icon::Book),
+    (6, "편의기능", icons::Icon::Grid),
+];
 fn shorten(s: &str, n: usize) -> String {
     let s = s.replace('\n', " ");
     if s.chars().count() > n {
@@ -720,14 +807,21 @@ fn shorten(s: &str, n: usize) -> String {
     }
 }
 fn main() -> eframe::Result {
+    // The root window is an invisible, never-minimized host. Every visible
+    // window (main, calendar, stickers, dialogs) is an independent child, so
+    // minimizing the main window leaves stickers alive on the desktop and the
+    // shared GL configuration supports real per-window transparency.
     eframe::run_native(
         "MEMONOKING",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1440., 900.])
-                .with_maximized(true)
-                .with_clamp_size_to_monitor_size(true)
-                .with_min_inner_size([1100., 720.]),
+                .with_title("MEMONOKING")
+                .with_inner_size([1., 1.])
+                .with_position([0., 0.])
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_transparent(true)
+                .with_taskbar(false),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),

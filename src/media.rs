@@ -144,7 +144,6 @@ impl App {
         .map_err(|e| e.to_string())
     }
     pub fn real_table_gallery(&mut self, ui: &mut egui::Ui) {
-        ui.heading("표 모아보기");
         ui.add(egui::TextEdit::singleline(&mut self.extra.table_search).hint_text("표 내용 검색"));
         let rows = [
             ["작업", "상태", "일정"],
@@ -213,7 +212,6 @@ impl App {
         if self.extra.media.is_empty() {
             self.extra.media = (0..3).map(sample_asset).collect();
         }
-        ui.heading("이미지 모아보기");
         let resident: usize = self
             .extra
             .media
@@ -296,8 +294,12 @@ impl App {
         ui.label(RichText::new("저장 위치와 비운 상태는 앱 실행 중에만 유지됩니다. 프로그램 종료 후 복원은 저장 기능 연결 단계에서 지원합니다.").small().color(MUTED));
     }
     pub fn real_bookmark_gallery(&mut self, ui: &mut egui::Ui) {
-        ui.heading("링크 · 즐겨찾기");
-        if ui.button("즐겨찾기 가져오기…").clicked() {
+        if ui
+            .add(egui::Button::new(
+                RichText::new("+  즐겨찾기 가져오기…").strong(),
+            ))
+            .clicked()
+        {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("즐겨찾기 HTML", &["html", "htm"])
                 .pick_file()
@@ -327,12 +329,45 @@ impl App {
             }
         }
         ui.label(RichText::new("Chrome / Edge의 UTF-8 HTML 내보내기 파일 · http/https만 허용 · 링크는 기본 브라우저로 열립니다.").small().color(MUTED));
-        for (t, url) in &self.extra.bookmarks {
-            ui.group(|ui| {
-                ui.hyperlink_to(t, url);
-                ui.label(RichText::new(url).small().color(MUTED));
-            });
-        }
+        ui.add_space(10.);
+        crate::ui::section_header(
+            ui,
+            crate::icons::Icon::Star,
+            "즐겨찾기",
+            Some(self.extra.bookmarks.len()),
+        );
+        crate::ui::card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if self.extra.bookmarks.is_empty() {
+                crate::ui::empty_state(
+                    ui,
+                    crate::icons::Icon::Star,
+                    "즐겨찾기가 없습니다",
+                    "브라우저에서 내보낸 즐겨찾기 HTML을 가져오세요",
+                );
+            }
+            for (k, (t, url)) in self.extra.bookmarks.iter().enumerate() {
+                let host = url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|r| r.split('/').next())
+                    .unwrap_or(url);
+                let r = crate::ui::list_row(
+                    ui,
+                    ui.id().with(("bookmark", k)),
+                    false,
+                    Some(crate::ui::BLUE),
+                    t,
+                    host,
+                    36.,
+                )
+                .on_hover_text(url)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if r.clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+        });
     }
 }
 fn read_image(path: &Path) -> Result<Vec<u8>, String> {
@@ -507,9 +542,15 @@ impl App {
     }
     pub fn missing_image_dialog(&mut self, ctx: &egui::Context) {
         if let Some(i) = self.extra.missing_image {
-            egui::Window::new("이미지 백업 찾기")
-                .collapsible(false)
-                .show(ctx, |ui| {
+            let mut open = true;
+            crate::ui::dialog(
+                ctx,
+                "missing_image",
+                "이미지 백업 찾기",
+                [420., 220.],
+                true,
+                &mut open,
+                |ui| {
                     ui.label("용량 관리로 원본 이미지가 정리되었습니다. 백업 파일을 찾아주세요.");
                     if let Some(path) = self.extra.media[i].path.clone() {
                         ui.label(path.display().to_string());
@@ -547,7 +588,11 @@ impl App {
                     if ui.button("닫기").clicked() {
                         self.extra.missing_image = None;
                     }
-                });
+                },
+            );
+            if !open {
+                self.extra.missing_image = None;
+            }
         }
     }
 }

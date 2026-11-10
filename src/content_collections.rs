@@ -17,10 +17,13 @@ impl App {
             }
             for (tab, document) in n.document.tabs.iter().enumerate() {
                 for (block, item) in document.blocks.iter().enumerate() {
+                    // A picture whose placeholder was deleted from the text
+                    // is no longer part of the note.
                     if matches!(
                         (images, item),
                         (true, Block::Picture(_)) | (false, Block::Table(_))
-                    ) {
+                    ) && document.shows(item)
+                    {
                         sources.push((i, tab, block));
                     }
                 }
@@ -40,21 +43,29 @@ impl App {
     pub fn content_tables(&mut self, ui: &mut egui::Ui) {
         let all = self.content_sources(false);
         if all.is_empty() {
-            self.real_table_gallery(ui);
+            if empty_with_example(
+                ui,
+                crate::icons::Icon::Grid,
+                "메모에 붙여 넣은 표가 없습니다",
+                "표를 복사해 메모 본문에 붙여 넣으면 여기에 모입니다",
+            ) {
+                self.real_table_gallery(ui);
+            }
             return;
         }
-        ui.heading("표 모아보기");
-        ui.label(
-            RichText::new(format!("메모 본문에 삽입한 표 {}개", all.len()))
-                .small()
-                .color(MUTED),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut self.extra.table_search)
-                .hint_text("표 안의 내용 검색")
-                .desired_width(340.),
-        );
-        ui.add_space(10.);
+        ui.horizontal(|ui| {
+            crate::ui::section_header(ui, crate::icons::Icon::Grid, "메모 속 표", Some(all.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::ui::search_field(
+                    ui,
+                    &mut self.extra.table_search,
+                    "table_search",
+                    "표 안의 내용 검색",
+                    300.,
+                );
+            });
+        });
+        ui.add_space(8.);
         let query = self.extra.table_search.to_lowercase();
         let mut found = 0;
         for (i, ti, bi) in all {
@@ -77,54 +88,53 @@ impl App {
             let mut open = false;
             let mut copy = 0;
             ui.push_id(("content_table", i, ti, bi), |ui| {
-                egui::Frame::NONE
-                    .fill(ui.visuals().faint_bg_color)
-                    .corner_radius(8.)
-                    .inner_margin(14.)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.strong(source_title);
-                            if ui.small_button("원본 메모").clicked() {
-                                open = true;
-                            }
-                            if ui.small_button("표로 복사").clicked() {
-                                copy = 1;
-                            }
-                            if ui.small_button("이미지로 복사").clicked() {
+                crate::ui::card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(source_title).strong().size(13.5));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::ui::pill(ui, false, "이미지로 복사").clicked() {
                                 copy = 2;
                             }
+                            if crate::ui::pill(ui, false, "표로 복사").clicked() {
+                                copy = 1;
+                            }
+                            if crate::ui::pill(ui, false, "원본 메모").clicked() {
+                                open = true;
+                            }
                         });
-                        ui.add_space(8.);
-                        egui::ScrollArea::horizontal()
-                            .id_salt(("content_table_scroll", i, ti, bi))
-                            .show(ui, |ui| {
-                                egui::Grid::new(("content_table_cells", i, ti, bi))
-                                    .striped(true)
-                                    .min_col_width(110.)
-                                    .max_col_width(260.)
-                                    .show(ui, |ui| {
-                                        for row in &table.cells {
-                                            for cell in row {
-                                                let mut text = RichText::new(&cell.text);
-                                                if cell.format.bold {
-                                                    text = text.strong();
-                                                }
-                                                if cell.format.italic {
-                                                    text = text.italics();
-                                                }
-                                                if cell.format.underline {
-                                                    text = text.underline();
-                                                }
-                                                if cell.format.strike {
-                                                    text = text.strikethrough();
-                                                }
-                                                ui.label(text);
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
-                            });
                     });
+                    ui.add_space(8.);
+                    egui::ScrollArea::horizontal()
+                        .id_salt(("content_table_scroll", i, ti, bi))
+                        .show(ui, |ui| {
+                            egui::Grid::new(("content_table_cells", i, ti, bi))
+                                .striped(true)
+                                .min_col_width(110.)
+                                .max_col_width(260.)
+                                .show(ui, |ui| {
+                                    for row in &table.cells {
+                                        for cell in row {
+                                            let mut text = RichText::new(&cell.text);
+                                            if cell.format.bold {
+                                                text = text.strong();
+                                            }
+                                            if cell.format.italic {
+                                                text = text.italics();
+                                            }
+                                            if cell.format.underline {
+                                                text = text.underline();
+                                            }
+                                            if cell.format.strike {
+                                                text = text.strikethrough();
+                                            }
+                                            ui.label(text);
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
             });
             if copy == 1 {
                 let result = arboard::Clipboard::new().and_then(|mut clipboard| {
@@ -151,17 +161,28 @@ impl App {
             ui.add_space(12.);
         }
         if found == 0 {
-            ui.label("표 안에 일치하는 내용이 없습니다");
+            crate::ui::empty_state(
+                ui,
+                crate::icons::Icon::Search,
+                "일치하는 표가 없습니다",
+                "다른 검색어로 찾아보세요",
+            );
         }
     }
 
     pub fn content_images(&mut self, ui: &mut egui::Ui) {
         let all = self.content_sources(true);
         if all.is_empty() {
-            self.real_image_gallery(ui);
+            if empty_with_example(
+                ui,
+                crate::icons::Icon::Grid,
+                "메모에 붙여 넣은 이미지가 없습니다",
+                "이미지를 복사해 메모 본문에 붙여 넣으면 여기에 모입니다",
+            ) {
+                self.real_image_gallery(ui);
+            }
             return;
         }
-        ui.heading("이미지 모아보기");
         let bytes: usize = all
             .iter()
             .filter_map(
@@ -335,6 +356,42 @@ impl App {
     }
 }
 
+/// An empty collection: a placeholder plus a toggle that shows example
+/// content. Returns whether the example is shown.
+fn empty_with_example(
+    ui: &mut egui::Ui,
+    icon: crate::icons::Icon,
+    title: &str,
+    hint: &str,
+) -> bool {
+    let id = ui.id().with(("show_example", title));
+    let mut show = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+    crate::ui::card(ui, |ui| {
+        ui.set_width(ui.available_width());
+        crate::ui::empty_state(ui, icon, title, hint);
+        ui.vertical_centered(|ui| {
+            if crate::ui::pill(
+                ui,
+                show,
+                if show {
+                    "예시 숨기기"
+                } else {
+                    "예시 보기"
+                },
+            )
+            .clicked()
+            {
+                show = !show;
+            }
+            ui.add_space(10.);
+        });
+    });
+    ui.data_mut(|d| d.insert_temp(id, show));
+    if show {
+        ui.add_space(12.);
+    }
+    show
+}
 fn table_html(table: &Table) -> String {
     format!(
         "<table>{}</table>",

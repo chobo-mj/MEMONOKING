@@ -30,6 +30,21 @@ pub enum Icon {
     Star,
     Opacity,
     Menu,
+    Sidebar,
+    Detach,
+    StickyPlus,
+    Filter,
+    PlusCircle,
+    Home,
+    Today,
+    Upcoming,
+    Notes,
+    Book,
+    Grid,
+    More,
+    Trash,
+    Arrange,
+    ChevronDown,
 }
 
 /// An icon-only control with a consistent hit area, keyboard focus and a spoken label.
@@ -40,9 +55,9 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
         let fill = if ui.visuals().dark_mode {
             Color32::from_white_alpha(18)
         } else {
-            Color32::from_black_alpha(12)
+            Color32::from_black_alpha(10)
         };
-        ui.painter().rect_filled(rect, 5.0, fill);
+        ui.painter().rect_filled(rect, 6.0, fill);
     }
     if response.has_focus() {
         ui.painter().rect_stroke(
@@ -59,13 +74,69 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
     } else {
         ui.visuals().weak_text_color()
     };
-    paint_icon(ui.painter(), rect.shrink(4.0), icon, color);
+    paint_icon(ui.painter(), rect.shrink(5.5), icon, color);
     response
         .on_hover_cursor(if ui.is_enabled() {
             CursorIcon::PointingHand
         } else {
             CursorIcon::Default
         })
+        .on_hover_text(tooltip)
+}
+
+/// Icon button that shows a persistent "on" state.
+pub fn toggle_icon(ui: &mut Ui, icon: Icon, tooltip: &str, on: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, tooltip));
+    if on {
+        ui.painter()
+            .rect_filled(rect, 6.0, ui.visuals().selection.bg_fill);
+    } else if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            if ui.visuals().dark_mode {
+                Color32::from_white_alpha(18)
+            } else {
+                Color32::from_black_alpha(10)
+            },
+        );
+    }
+    let color = if on {
+        crate::ui::ACCENT
+    } else {
+        ui.visuals()
+            .text_color()
+            .gamma_multiply(if response.hovered() { 1.0 } else { 0.7 })
+    };
+    paint_icon(ui.painter(), rect.shrink(5.5), icon, color);
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
+}
+
+/// A 22 px icon button for dense rows.
+pub fn small_icon(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tooltip));
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            5.0,
+            if ui.visuals().dark_mode {
+                Color32::from_white_alpha(18)
+            } else {
+                Color32::from_black_alpha(10)
+            },
+        );
+    }
+    let color = ui
+        .visuals()
+        .text_color()
+        .gamma_multiply(if response.hovered() { 0.95 } else { 0.55 });
+    paint_icon(ui.painter(), rect.shrink(4.0), icon, color);
+    response
+        .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(tooltip)
 }
 
@@ -115,7 +186,7 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
     let scale = rect.width().min(rect.height()) / 24.0;
     let origin = rect.center() - Vec2::splat(12.0 * scale);
     let p = |x: f32, y: f32| origin + Vec2::new(x, y) * scale;
-    let stroke = Stroke::new((1.6 * scale).max(1.0), color);
+    let stroke = Stroke::new((1.55 * scale).max(1.0), color);
     let line = |a: (f32, f32), b: (f32, f32)| {
         painter.line_segment([p(a.0, a.1), p(b.0, b.1)], stroke);
     };
@@ -283,8 +354,116 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
             painter.add(Shape::line(points, stroke));
             painter.circle_stroke(p(12.0, 12.0), 3.0 * scale, stroke);
         }
+        Icon::ChevronDown => path(&[(5.5, 9.5), (12., 16.), (18.5, 9.5)]),
         Icon::ChevronLeft => path(&[(14.5, 5.5), (8.0, 12.0), (14.5, 18.5)]),
         Icon::ChevronRight => path(&[(9.5, 5.5), (16.0, 12.0), (9.5, 18.5)]),
+        Icon::Sidebar => {
+            box_outline((3., 4.), (21., 20.), 2.5);
+            line((9., 4.), (9., 20.));
+        }
+        Icon::Detach => {
+            box_outline((3., 6.), (17., 20.), 2.);
+            path(&[(13., 3.), (21., 3.), (21., 11.)]);
+            line((21., 3.), (12., 12.));
+        }
+        Icon::StickyPlus => {
+            path(&[
+                (4., 4.),
+                (20., 4.),
+                (20., 14.),
+                (14., 20.),
+                (4., 20.),
+                (4., 4.),
+            ]);
+            path(&[(14., 20.), (14., 14.), (20., 14.)]);
+            line((8., 10.), (14., 10.));
+            line((11., 7.), (11., 13.));
+        }
+        Icon::Filter => {
+            line((4., 7.), (20., 7.));
+            line((7., 12.), (17., 12.));
+            line((10., 17.), (14., 17.));
+        }
+        Icon::PlusCircle => {
+            painter.circle_filled(p(12., 12.), 9.5 * scale, crate::ui::ACCENT);
+            let s = Stroke::new((1.8 * scale).max(1.0), Color32::WHITE);
+            painter.line_segment([p(8., 12.), p(16., 12.)], s);
+            painter.line_segment([p(12., 8.), p(12., 16.)], s);
+        }
+        Icon::Home => {
+            path(&[(4., 11.), (12., 4.), (20., 11.)]);
+            path(&[(6., 9.5), (6., 20.), (18., 20.), (18., 9.5)]);
+            line((10., 20.), (10., 15.));
+            line((14., 20.), (14., 15.));
+            line((10., 15.), (14., 15.));
+        }
+        Icon::Today => {
+            box_outline((3.5, 5.), (20.5, 20.5), 2.5);
+            line((8., 3.), (8., 7.));
+            line((16., 3.), (16., 7.));
+            painter.text(
+                p(12., 14.2),
+                egui::Align2::CENTER_CENTER,
+                chrono::Local::now().format("%-d").to_string(),
+                egui::FontId::proportional(8.5 * scale),
+                color,
+            );
+        }
+        Icon::Upcoming => {
+            box_outline((3.5, 5.), (20.5, 20.5), 2.5);
+            line((3.5, 10.), (20.5, 10.));
+            line((8., 3.), (8., 7.));
+            line((16., 3.), (16., 7.));
+            path(&[(10., 13.), (13., 15.5), (10., 18.)]);
+        }
+        Icon::Notes => {
+            box_outline((4., 3.), (20., 21.), 2.5);
+            line((8., 8.), (16., 8.));
+            line((8., 12.), (16., 12.));
+            line((8., 16.), (13., 16.));
+        }
+        Icon::Book => {
+            path(&[
+                (12., 6.),
+                (8., 4.5),
+                (3.5, 4.5),
+                (3.5, 18.5),
+                (8., 18.5),
+                (12., 20.),
+            ]);
+            path(&[
+                (12., 6.),
+                (16., 4.5),
+                (20.5, 4.5),
+                (20.5, 18.5),
+                (16., 18.5),
+                (12., 20.),
+            ]);
+            line((12., 6.), (12., 20.));
+        }
+        Icon::Grid => {
+            for (x, y) in [(4., 4.), (13., 4.), (4., 13.), (13., 13.)] {
+                box_outline((x, y), (x + 7., y + 7.), 1.8);
+            }
+        }
+        Icon::More => {
+            for x in [6., 12., 18.] {
+                painter.circle_filled(p(x, 12.), 1.5 * scale, color);
+            }
+        }
+        Icon::Trash => {
+            line((4., 7.), (20., 7.));
+            path(&[(9., 7.), (9., 4.), (15., 4.), (15., 7.)]);
+            path(&[(6., 7.), (7., 20.), (17., 20.), (18., 7.)]);
+            line((10., 11.), (10., 16.));
+            line((14., 11.), (14., 16.));
+        }
+        Icon::Arrange => {
+            box_outline((3., 4.), (10., 10.), 1.5);
+            box_outline((3., 14.), (10., 20.), 1.5);
+            line((14., 7.), (21., 7.));
+            line((14., 17.), (21., 17.));
+        }
         Icon::Pin => {
             path(&[
                 (8.0, 4.0),

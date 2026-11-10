@@ -81,15 +81,18 @@ impl Table {
         t
     }
 }
+/// An image stored in a tab. It is shown inline wherever its placeholder
+/// character (`placeholder(id)`) appears in the tab's text, so it moves,
+/// wraps, copies and deletes exactly like a character.
 #[derive(Clone)]
 pub struct Picture {
+    pub id: u32,
     pub name: String,
     pub pixels: Vec<u8>,
     pub width: usize,
     pub height: usize,
     pub scale: f32,
     pub fit: bool,
-    pub indent: usize,
     texture: Option<egui::TextureHandle>,
 }
 #[derive(Clone)]
@@ -105,7 +108,42 @@ pub struct Tab {
     pub spans: Vec<Span>,
     pub blocks: Vec<Block>,
 }
+pub const PICTURE_BASE: u32 = 0xE000;
+pub fn placeholder(id: u32) -> char {
+    char::from_u32(PICTURE_BASE + id.min(0x18FF)).unwrap_or('\u{E000}')
+}
+fn picture_id(c: char) -> Option<u32> {
+    let v = c as u32;
+    (PICTURE_BASE..=PICTURE_BASE + 0x18FF)
+        .contains(&v)
+        .then(|| v - PICTURE_BASE)
+}
 impl Tab {
+    /// True when the picture's placeholder is still present in the text.
+    pub fn shows(&self, block: &Block) -> bool {
+        match block {
+            Block::Picture(p) => self.body.contains(placeholder(p.id)),
+            Block::Table(_) => true,
+        }
+    }
+    fn next_picture_id(&self) -> u32 {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Picture(p) => Some(p.id + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+    /// Insert a picture at a character range, replacing it. Returns the caret.
+    pub fn insert_picture(&mut self, range: Range<usize>, mut picture: Picture) -> usize {
+        picture.id = self.next_picture_id();
+        let c = placeholder(picture.id);
+        self.blocks.push(Block::Picture(picture));
+        replace_chars(&mut self.body, range.clone(), &c.to_string());
+        range.start + 1
+    }
     fn new(title: String) -> Self {
         Self {
             title,
@@ -141,6 +179,7 @@ pub struct Document {
     zoom_until: f64,
     aliases: Vec<(String, String)>,
     first_tab_changed: bool,
+    selected_picture: Option<u32>,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -168,15 +207,16 @@ impl Default for Document {
             zoom_until: 0.,
             aliases: vec![],
             first_tab_changed: false,
+            selected_picture: None,
         }
     }
 }
 impl Document {
     pub fn plain_text(&self, first_body: &str) -> String {
-        let mut parts = vec![first_body.to_owned()];
+        let mut parts = vec![strip_pictures(first_body)];
         for (i, t) in self.tabs.iter().enumerate() {
             if i > 0 {
-                parts.push(t.body.clone());
+                parts.push(strip_pictures(&t.body));
             }
             for b in &t.blocks {
                 if let Block::Table(t) = b {
@@ -187,9 +227,11 @@ impl Document {
         parts.join("\n")
     }
     pub fn has_images(&self) -> bool {
-        self.tabs
-            .iter()
-            .any(|t| t.blocks.iter().any(|b| matches!(b, Block::Picture(_))))
+        self.tabs.iter().any(|t| {
+            t.blocks
+                .iter()
+                .any(|b| matches!(b, Block::Picture(_)) && t.shows(b))
+        })
     }
     pub fn has_tables(&self) -> bool {
         self.tabs
@@ -264,7 +306,7 @@ pub fn show(
             .max_rect(bounds)
             .layout(egui::Layout::bottom_up(egui::Align::Min)),
     );
-    render_footer(&mut footer_ui, doc, id, 0., true);
+    render_footer(&mut footer_ui, doc, id, 0., true, true);
     let content_bottom =
         (footer_ui.min_rect().top() - ui.spacing().item_spacing.y).max(bounds.top());
     let content_rect =
@@ -295,9 +337,10 @@ pub fn footer(
     doc: &mut Document,
     id: impl Hash,
     trailing_space: f32,
+    divider: bool,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
-    render_footer(ui, doc, id, trailing_space, false)
+    render_footer(ui, doc, id, trailing_space, false, divider)
 }
 fn content_impl(
     ui: &mut egui::Ui,
@@ -439,16 +482,29 @@ fn content_impl(
                 }
             })
         });
+        // Placeholders only come from real images; never accept stray ones.
+        ui.input_mut(|i| {
+            for e in &mut i.events {
+                if let egui::Event::Paste(t) | egui::Event::Text(t) = e {
+                    if t.chars().any(|c| picture_id(c).is_some()) {
+                        *t = strip_pictures(t);
+                    }
+                }
+            }
+        });
+        let mut table_pasted = false;
+        let text_pasted = paste.is_some();
         if let Some(paste) = paste.filter(|t| t.contains('\t') && t.len() < 1024 * 1024) {
             doc.tabs[doc.active]
                 .blocks
                 .push(Block::Table(Table::from_tsv(&paste)));
             ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+            table_pasted = true;
         }
-        if ui.input(|i| i.modifiers.command && i.key_pressed(Key::V)) {
-            if let Ok(mut picture) = picture_from_clipboard(doc.image_scale, doc.image_fit) {
-                picture.indent = line_indent(&doc.tabs[doc.active].body, old_range.start);
-                doc.tabs[doc.active].blocks.push(Block::Picture(picture));
+        if !table_pasted && !text_pasted && paste_chord(ui, text_id) {
+            if let Ok(picture) = picture_from_clipboard(doc.image_scale, doc.image_fit) {
+                pending_cursor =
+                    Some(doc.tabs[doc.active].insert_picture(old_range.clone(), picture));
                 ui.input_mut(|i| {
                     i.events.retain(|e| {
                         !matches!(
@@ -459,14 +515,34 @@ fn content_impl(
                 });
             }
         }
+        if let Some(id) = doc.selected_picture {
+            if ui.input_mut(|i| {
+                i.consume_key(Modifiers::NONE, Key::Delete)
+                    || i.consume_key(Modifiers::NONE, Key::Backspace)
+            }) {
+                let c = placeholder(id);
+                let tab = &mut doc.tabs[doc.active];
+                if let Some(at) = tab.body.chars().position(|x| x == c) {
+                    replace_chars(&mut tab.body, at..at + 1, "");
+                    pending_cursor = Some(at);
+                }
+                doc.selected_picture = None;
+            }
+        }
     }
     let font = font_id(ui, doc.font_size * doc.zoom, &doc.font_name, false);
     let bold_font = font_id(ui, doc.font_size * doc.zoom, &doc.font_name, true);
     let spans = doc.tabs[doc.active].spans.clone();
     let base = Format::default();
     let color = ui.visuals().text_color();
+    let pictures = picture_sizes(&doc.tabs[doc.active], doc.zoom);
+    let space_ratio = ui
+        .fonts(|f| f.glyph_width(&FontId::new(100., font.family.clone()), '\u{3000}'))
+        .max(1.)
+        / 100.;
     let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
         let mut job = layout(text, &spans, &base, font.clone(), bold_font.clone(), color);
+        inline_pictures(&mut job, &pictures, width, space_ratio);
         job.wrap.max_width = width;
         ui.fonts(|f| f.layout_job(job))
     };
@@ -503,6 +579,7 @@ fn content_impl(
                     );
                 }
             }
+            paint_pictures(ui, doc, id, &output, &pictures);
             show_links(ui, doc, id);
             show_blocks(ui, doc, id);
             output
@@ -614,7 +691,11 @@ fn content_impl(
         });
         for path in paths {
             match picture_from_file(&path, doc.image_scale, doc.image_fit) {
-                Ok(p) => doc.tabs[doc.active].blocks.push(Block::Picture(p)),
+                Ok(p) => {
+                    let range = doc.selection.clone();
+                    let caret = doc.tabs[doc.active].insert_picture(range, p);
+                    doc.selection = caret..caret;
+                }
                 Err(e) => doc.status = e,
             }
         }
@@ -887,6 +968,7 @@ fn render_footer(
     id: Id,
     trailing_space: f32,
     bottom_up: bool,
+    divider: bool,
 ) -> egui::Response {
     if doc.tabs.is_empty() {
         doc.tabs.push(Tab::new("본문".into()));
@@ -912,10 +994,17 @@ fn render_footer(
                 toolbar(ui, doc, id);
             });
         };
+        let line = |ui: &mut egui::Ui| {
+            if divider {
+                crate::ui::divider(ui);
+            } else {
+                ui.add_space(1.);
+            }
+        };
         if bottom_up {
             if doc.toolbar_visible {
                 tools(ui, doc);
-                ui.separator();
+                line(ui);
             }
             tabs(ui, doc, id);
             status(ui, doc);
@@ -923,7 +1012,7 @@ fn render_footer(
             status(ui, doc);
             tabs(ui, doc, id);
             if doc.toolbar_visible {
-                ui.separator();
+                line(ui);
                 tools(ui, doc);
             }
         }
@@ -939,22 +1028,17 @@ enum Tool {
     Italic,
     Underline,
     Strike,
-    Table,
-    Image,
     Opacity,
-    Zoom,
 }
-const TOOLS: [Tool; 10] = [
+// Images and tables arrive from the clipboard; zoom stays on Ctrl+wheel.
+const TOOLS: [Tool; 7] = [
     Tool::Font,
     Tool::Size,
     Tool::Bold,
     Tool::Italic,
     Tool::Underline,
     Tool::Strike,
-    Tool::Table,
-    Tool::Image,
     Tool::Opacity,
-    Tool::Zoom,
 ];
 fn toolbar_height(width: f32) -> f32 {
     let columns = (((width.max(28.) + 2.) / 30.).floor() as usize).clamp(1, TOOLS.len());
@@ -982,17 +1066,13 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
                         Tool::Italic => ("기울임 · Ctrl+I".into(), doc.format.italic),
                         Tool::Underline => ("밑줄 · Ctrl+U".into(), doc.format.underline),
                         Tool::Strike => ("취소선".into(), doc.format.strike),
-                        Tool::Table => ("표 삽입".into(), false),
-                        Tool::Image => ("이미지 삽입".into(), false),
                         Tool::Opacity => {
                             (format!("메모 투명도 · {:.0}%", doc.opacity * 100.), false)
                         }
-                        Tool::Zoom => (
-                            format!("본문 배율 · {:.0}% · Ctrl+휠", doc.zoom * 100.),
-                            false,
-                        ),
                     };
-                    let response = tool_button(ui, tool, &label, selected);
+                    let size_text =
+                        (tool == Tool::Size).then(|| format!("{:.0}", doc.font_size * 0.75));
+                    let response = tool_button(ui, tool, &label, selected, size_text);
                     match tool {
                         Tool::Bold | Tool::Italic | Tool::Underline | Tool::Strike => {
                             if response.clicked() {
@@ -1069,94 +1149,32 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
                                                 doc.font_size = pt.round() / 0.75;
                                             }
                                         }
-                                        Tool::Table => {
-                                            ui.strong("표 삽입");
-                                            ui.horizontal(|ui| {
-                                                for (rows, cols) in [(2, 2), (3, 3), (3, 4)] {
-                                                    if ui
-                                                        .button(format!("{rows} × {cols}"))
-                                                        .clicked()
-                                                    {
-                                                        doc.tabs[doc.active].blocks.push(
-                                                            Block::Table(Table::new(rows, cols)),
-                                                        );
-                                                        ui.memory_mut(|m| m.close_popup());
-                                                    }
-                                                }
-                                            });
-                                            ui.separator();
-                                            ui.label("복사한 표는 Ctrl+V로 붙일 수 있습니다.");
-                                        }
-                                        Tool::Image => {
-                                            ui.strong("이미지 삽입");
-                                            if ui.button("파일에서 추가…").clicked() {
-                                                if let Some(path) = rfd::FileDialog::new()
-                                                    .add_filter("이미지", &["png", "jpg", "jpeg"])
-                                                    .pick_file()
-                                                {
-                                                    match picture_from_file(
-                                                        &path,
-                                                        doc.image_scale,
-                                                        doc.image_fit,
-                                                    ) {
-                                                        Ok(p) => doc.tabs[doc.active]
-                                                            .blocks
-                                                            .push(Block::Picture(p)),
-                                                        Err(e) => doc.status = e,
-                                                    }
-                                                }
-                                                ui.memory_mut(|m| m.close_popup());
-                                            }
-                                            if ui.button("클립보드 이미지 붙이기").clicked()
-                                            {
-                                                match picture_from_clipboard(
-                                                    doc.image_scale,
-                                                    doc.image_fit,
-                                                ) {
-                                                    Ok(p) => doc.tabs[doc.active]
-                                                        .blocks
-                                                        .push(Block::Picture(p)),
-                                                    Err(e) => doc.status = e,
-                                                }
-                                                ui.memory_mut(|m| m.close_popup());
-                                            }
-                                        }
                                         Tool::Opacity => {
-                                            ui.strong("메모 투명도");
-                                            ui.add(
-                                                egui::Slider::new(&mut doc.opacity, 0.2..=1.)
-                                                    .show_value(false),
-                                            );
-                                            ui.label(format!("{:.0}%", doc.opacity * 100.));
-                                        }
-                                        Tool::Zoom => {
-                                            ui.strong("본문 배율");
-                                            ui.horizontal_wrapped(|ui| {
-                                                for zoom in [0.3, 0.5, 0.75, 1., 1.25, 1.5, 2.] {
-                                                    if ui
-                                                        .selectable_label(
-                                                            (doc.zoom - zoom).abs() < 0.01,
-                                                            format!("{:.0}%", zoom * 100.),
-                                                        )
-                                                        .clicked()
-                                                    {
-                                                        doc.zoom = zoom;
-                                                        doc.zoom_until = ui.input(|i| i.time) + 0.9;
-                                                        ui.memory_mut(|m| m.close_popup());
-                                                    }
-                                                }
-                                            });
-                                            ui.separator();
+                                            crate::ui::caption(ui, "메모 투명도");
+                                            let mut pct = (doc.opacity * 100.).round();
                                             if ui
                                                 .add(
-                                                    egui::Slider::new(&mut doc.zoom, 0.3..=2.)
-                                                        .show_value(false),
+                                                    egui::Slider::new(&mut pct, 20.0..=100.)
+                                                        .integer()
+                                                        .suffix("%"),
                                                 )
                                                 .changed()
                                             {
-                                                doc.zoom_until = ui.input(|i| i.time) + 0.9;
+                                                doc.opacity = pct / 100.;
                                             }
-                                            ui.label("Ctrl+휠로도 조절할 수 있습니다.");
+                                            ui.horizontal(|ui| {
+                                                for v in [40., 60., 80., 100.] {
+                                                    if ui
+                                                        .selectable_label(
+                                                            (pct - v).abs() < 0.5,
+                                                            format!("{v:.0}%"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        doc.opacity = v / 100.;
+                                                    }
+                                                }
+                                            });
                                         }
                                         _ => {}
                                     }
@@ -1170,7 +1188,13 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
     )
     .response
 }
-fn tool_button(ui: &mut egui::Ui, tool: Tool, label: &str, selected: bool) -> egui::Response {
+fn tool_button(
+    ui: &mut egui::Ui,
+    tool: Tool,
+    label: &str,
+    selected: bool,
+    text: Option<String>,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.), egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
@@ -1202,7 +1226,17 @@ fn tool_button(ui: &mut egui::Ui, tool: Tool, label: &str, selected: bool) -> eg
         } else {
             0.78
         });
-    paint_tool(ui.painter(), rect.shrink(4.), tool, color);
+    if let Some(text) = text {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(12.5),
+            color,
+        );
+    } else {
+        paint_tool(ui.painter(), rect.shrink(5.), tool, color);
+    }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(label)
@@ -1220,14 +1254,6 @@ fn paint_tool(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: Colo
             points.iter().map(|&(x, y)| p(x, y)).collect(),
             stroke,
         ));
-    };
-    let box_outline = || {
-        painter.rect_stroke(
-            egui::Rect::from_min_max(p(3., 4.), p(21., 20.)),
-            1.,
-            stroke,
-            egui::StrokeKind::Inside,
-        );
     };
     match tool {
         Tool::Font => {
@@ -1287,18 +1313,6 @@ fn paint_tool(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: Colo
             ]);
             line((3., 12.), (21., 12.));
         }
-        Tool::Table => {
-            box_outline();
-            line((9., 4.), (9., 20.));
-            line((15., 4.), (15., 20.));
-            line((3., 10.), (21., 10.));
-            line((3., 15.), (21., 15.));
-        }
-        Tool::Image => {
-            box_outline();
-            painter.circle_stroke(p(8., 9.), 2. * unit, stroke);
-            path(&[(4., 19.), (11., 12.), (15., 16.), (18., 12.), (21., 15.)]);
-        }
         Tool::Opacity => {
             painter.circle_stroke(p(12., 12.), 8. * unit, stroke);
             let mut points = vec![p(12., 4.), p(12., 20.)];
@@ -1308,19 +1322,63 @@ fn paint_tool(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: Colo
             }
             painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
         }
-        Tool::Zoom => {
-            painter.circle_stroke(p(10., 10.), 6. * unit, stroke);
-            line((14.5, 14.5), (21., 21.));
-            line((7., 10.), (13., 10.));
-            line((10., 7.), (10., 13.));
-        }
     }
 }
 
+/// A compact tab chip: the selected one is lifted, the rest are plain text.
+/// A document tab: plain text, the selected one carries an underline.
+fn tab_chip(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    let ink = ui.visuals().text_color();
+    let galley = ui.painter().layout_no_wrap(
+        text.into(),
+        FontId::proportional(12.5),
+        if selected {
+            ink
+        } else {
+            ink.gamma_multiply(0.55)
+        },
+    );
+    let (rect, r) =
+        ui.allocate_exact_size(Vec2::new(galley.size().x + 16., 24.), egui::Sense::click());
+    if r.hovered() && !selected {
+        ui.painter().rect_filled(rect, 6., ink.gamma_multiply(0.07));
+    }
+    let text_rect = egui::Rect::from_center_size(rect.center() - Vec2::new(0., 1.), galley.size());
+    ui.painter().galley(text_rect.min, galley, ink);
+    if selected {
+        let y = rect.bottom() - 1.5;
+        ui.painter().line_segment(
+            [
+                egui::pos2(text_rect.left(), y),
+                egui::pos2(text_rect.right(), y),
+            ],
+            Stroke::new(2.0_f32, ink.gamma_multiply(0.8)),
+        );
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+/// A small round icon button used beside the tabs.
+fn tab_icon(ui: &mut egui::Ui, icon: crate::icons::Icon, tip: &str) -> egui::Response {
+    let ink = ui.visuals().text_color();
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(22., 24.), egui::Sense::click());
+    if r.hovered() {
+        ui.painter()
+            .circle_filled(rect.center(), 10., ink.gamma_multiply(0.08));
+    }
+    crate::icons::paint_icon(
+        ui.painter(),
+        egui::Rect::from_center_size(rect.center(), Vec2::splat(12.)),
+        icon,
+        ink.gamma_multiply(if r.hovered() { 0.85 } else { 0.5 }),
+    );
+    r.on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 fn tabs(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
-    ui.add_space(4.);
+    ui.add_space(2.);
     let mut delete = None;
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.;
         let visible: Vec<_> = doc
             .tabs
             .iter()
@@ -1331,12 +1389,11 @@ fn tabs(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
         let limit = ((ui.available_width() - 82.) / 82.).floor().max(1.) as usize;
         let max_scroll = visible.len().saturating_sub(limit);
         doc.tab_scroll = doc.tab_scroll.min(max_scroll);
-        if max_scroll > 0 && ui.small_button("‹").on_hover_text("이전 탭").clicked() {
+        if max_scroll > 0 && tab_icon(ui, crate::icons::Icon::ChevronLeft, "이전 탭").clicked() {
             doc.tab_scroll = doc.tab_scroll.saturating_sub(1);
         }
         for &i in visible.iter().skip(doc.tab_scroll).take(limit) {
-            let r =
-                ui.add(egui::Button::new(short(&doc.tabs[i].title, 10)).selected(doc.active == i));
+            let r = tab_chip(ui, &short(&doc.tabs[i].title, 10), doc.active == i);
             if r.clicked() {
                 doc.active = i;
                 doc.selected_cell = None;
@@ -1371,13 +1428,16 @@ fn tabs(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
                 });
             });
         }
-        if max_scroll > 0 && ui.small_button("›").on_hover_text("다음 탭").clicked() {
+        if max_scroll > 0 && tab_icon(ui, crate::icons::Icon::ChevronRight, "다음 탭").clicked()
+        {
             doc.tab_scroll = (doc.tab_scroll + 1).min(max_scroll);
         }
-        if ui
-            .small_button("+")
-            .on_hover_text("본문 탭 추가 · 메모 속성은 함께 사용")
-            .clicked()
+        if tab_icon(
+            ui,
+            crate::icons::Icon::Plus,
+            "본문 탭 추가 · 메모 속성은 함께 사용",
+        )
+        .clicked()
         {
             doc.add_tab();
             doc.tab_scroll = max_scroll + 1;
@@ -1389,24 +1449,28 @@ fn tabs(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
     if let Some(i) = doc.rename {
         if i < doc.tabs.len() {
             let mut open = true;
-            egui::Window::new("탭 이름 바꾸기")
-                .id(id.with("rename_popup"))
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("탭 이름");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut doc.tabs[i].title)
-                                .id(id.with("rename"))
-                                .desired_width(130.),
-                        );
-                        if ui.button("확인").clicked() {
-                            doc.rename = None;
-                        }
-                    });
-                });
+            crate::ui::dialog(
+                ui.ctx(),
+                id.with("rename_popup"),
+                "탭 이름 바꾸기",
+                [300., 150.],
+                true,
+                &mut open,
+                |ui| {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut doc.tabs[i].title)
+                            .id(id.with("rename"))
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(10, 6)),
+                    );
+                    r.request_focus();
+                    let enter = ui.input(|i| i.key_pressed(Key::Enter));
+                    let (ok, _) = crate::ui::dialog_buttons(ui, "확인", "");
+                    if ok || enter {
+                        doc.rename = None;
+                    }
+                },
+            );
             if !open {
                 doc.rename = None;
             }
@@ -1456,15 +1520,253 @@ fn show_links(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
         }
     });
 }
+/// True on the frame Ctrl+V goes down. egui turns Ctrl+V into a text paste
+/// event and drops the key entirely, so an image-only clipboard produces no
+/// event at all; read the key state directly instead.
+fn paste_chord(ui: &egui::Ui, id: Id) -> bool {
+    let key = id.with("paste_chord");
+    let down = chord_down() || ui.input(|i| i.modifiers.command && i.key_pressed(Key::V));
+    let was = ui.data(|d| d.get_temp::<bool>(key)).unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(key, down));
+    down && !was
+}
+#[cfg(windows)]
+fn chord_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
+    // Reads the current physical key state only; no pointers are involved.
+    unsafe {
+        (GetAsyncKeyState(i32::from(VK_CONTROL)) as u16 & 0x8000) != 0
+            && (GetAsyncKeyState(0x56) as u16 & 0x8000) != 0
+    }
+}
+#[cfg(not(windows))]
+fn chord_down() -> bool {
+    false
+}
+/// Inline size inputs for each picture of a tab, keyed by placeholder.
+#[derive(Clone, Copy)]
+struct PictureSize {
+    key: char,
+    width: f32,
+    ratio: f32,
+    fit: bool,
+}
+impl PictureSize {
+    fn at(&self, wrap: f32) -> Vec2 {
+        let room = (wrap - 4.).max(16.);
+        let w = if self.fit { room } else { self.width.min(room) };
+        // Quantized so continuous window resizing reuses cached font sizes.
+        let w = ((w / 4.).floor() * 4.).max(8.);
+        Vec2::new(w, (w * self.ratio).max(4.))
+    }
+}
+fn picture_sizes(tab: &Tab, zoom: f32) -> Vec<PictureSize> {
+    tab.blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Picture(p) if p.width > 0 && p.height > 0 => Some(PictureSize {
+                key: placeholder(p.id),
+                width: p.width as f32 * p.scale * zoom,
+                ratio: p.height as f32 / p.width as f32,
+                fit: p.fit,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+/// Replace each picture placeholder with an invisible full-width space whose
+/// advance and row height equal the picture, so text flows around it.
+fn inline_pictures(job: &mut LayoutJob, pictures: &[PictureSize], wrap: f32, ratio: f32) {
+    if pictures.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for section in &mut job.sections {
+        let Some(c) = job.text[section.byte_range.clone()].chars().next() else {
+            continue;
+        };
+        let Some(size) = pictures.iter().find(|p| p.key == c) else {
+            continue;
+        };
+        let s = size.at(wrap);
+        section.format.font_id = FontId::new(s.x / ratio, section.format.font_id.family.clone());
+        section.format.line_height = Some(s.y + 4.);
+        section.format.color = Color32::TRANSPARENT;
+        section.format.underline = Stroke::NONE;
+        section.format.strikethrough = Stroke::NONE;
+        section.format.italics = false;
+        section.format.valign = egui::Align::BOTTOM;
+        changed = true;
+    }
+    if changed {
+        // Placeholders and U+3000 are both three UTF-8 bytes, so every
+        // section's byte range stays valid after the substitution.
+        job.text = job
+            .text
+            .chars()
+            .map(|c| {
+                if pictures.iter().any(|p| p.key == c) {
+                    '\u{3000}'
+                } else {
+                    c
+                }
+            })
+            .collect();
+    }
+}
+/// Where the picture whose placeholder is character `idx` is drawn: on the
+/// bottom of its own row. A soft-wrapped picture starts a new row; without
+/// `prefer_next_row` its position would be the end of the row above, which
+/// drew the picture over the preceding text.
+fn picture_rect(galley: &egui::Galley, idx: usize, s: Vec2) -> egui::Rect {
+    let caret = galley.pos_from_ccursor(CCursor {
+        index: idx,
+        prefer_next_row: true,
+    });
+    egui::Rect::from_min_size(egui::pos2(caret.min.x, caret.max.y - s.y - 2.), s)
+}
+fn paint_pictures(
+    ui: &mut egui::Ui,
+    doc: &mut Document,
+    id: Id,
+    output: &egui::text_edit::TextEditOutput,
+    pictures: &[PictureSize],
+) {
+    if pictures.is_empty() {
+        return;
+    }
+    let wrap = output.galley.job.wrap.max_width;
+    let origin = output.galley_pos.to_vec2();
+    let body: Vec<char> = doc.tabs[doc.active].body.chars().collect();
+    let painter = ui.painter().with_clip_rect(output.text_clip_rect);
+    let mut clicked_any = false;
+    for (idx, c) in body.iter().enumerate() {
+        let Some(size) = pictures.iter().find(|p| p.key == *c) else {
+            continue;
+        };
+        let pid = picture_id(*c).unwrap_or(0);
+        let rect = picture_rect(&output.galley, idx, size.at(wrap)).translate(origin);
+        let Some(Block::Picture(p)) = doc.tabs[doc.active]
+            .blocks
+            .iter_mut()
+            .find(|b| matches!(b, Block::Picture(p) if p.id == pid))
+        else {
+            continue;
+        };
+        if p.texture.is_none() && p.pixels.len() == p.width * p.height * 4 {
+            p.texture = Some(
+                ui.ctx().load_texture(
+                    id.with(("inline_picture", doc.active, pid))
+                        .short_debug_format(),
+                    egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.pixels),
+                    egui::TextureOptions::LINEAR,
+                ),
+            );
+        }
+        if let Some(t) = &p.texture {
+            painter.image(
+                t.id(),
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+                Color32::WHITE,
+            );
+        }
+        if !output.text_clip_rect.intersects(rect) {
+            continue;
+        }
+        let r = ui
+            .interact(
+                rect.intersect(output.text_clip_rect),
+                id.with(("picture_hit", doc.active, pid, idx)),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if r.clicked() {
+            doc.selected_picture = Some(pid);
+            clicked_any = true;
+        }
+        if doc.selected_picture != Some(pid) {
+            continue;
+        }
+        painter.rect_stroke(
+            rect.expand(1.),
+            2.,
+            Stroke::new(2.0_f32, crate::ui::ACCENT),
+            egui::StrokeKind::Outside,
+        );
+        let mut close = false;
+        let mut delete = false;
+        egui::Area::new(id.with(("picture_tools", pid)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_top() - Vec2::new(0., 34.))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.;
+                            for (value, label) in
+                                [(0.25, "25%"), (0.5, "50%"), (0.75, "75%"), (1., "100%")]
+                            {
+                                if ui
+                                    .selectable_label(
+                                        !p.fit && (p.scale - value).abs() < 0.01,
+                                        label,
+                                    )
+                                    .clicked()
+                                {
+                                    p.scale = value;
+                                    p.fit = false;
+                                }
+                            }
+                            if ui.selectable_label(p.fit, "너비 맞춤").clicked() {
+                                p.fit = true;
+                            }
+                            ui.separator();
+                            if ui.button("복사").clicked() {
+                                if let Ok(mut c) = arboard::Clipboard::new() {
+                                    let _ = c.set_image(arboard::ImageData {
+                                        width: p.width,
+                                        height: p.height,
+                                        bytes: std::borrow::Cow::Borrowed(&p.pixels),
+                                    });
+                                }
+                                close = true;
+                            }
+                            if ui.button("삭제").clicked() {
+                                delete = true;
+                                close = true;
+                            }
+                        });
+                    });
+            });
+        if delete {
+            let tab = &mut doc.tabs[doc.active];
+            let key = placeholder(pid);
+            tab.body = tab.body.chars().filter(|c| *c != key).collect();
+        }
+        if close {
+            doc.selected_picture = None;
+            return;
+        }
+    }
+    if !clicked_any
+        && doc.selected_picture.is_some()
+        && ui.input(|i| i.pointer.any_pressed())
+        && output.response.hovered()
+    {
+        doc.selected_picture = None;
+    }
+}
 fn show_blocks(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
     let font = font_id(ui, doc.font_size * doc.zoom, &doc.font_name, false);
     let bold_font = font_id(ui, doc.font_size * doc.zoom, &doc.font_name, true);
     let mut remove = None;
     let mut selected = doc.selected_cell;
     for (bi, block) in doc.tabs[doc.active].blocks.iter_mut().enumerate() {
-        ui.add_space(8.);
         match block {
             Block::Table(t) => {
+                ui.add_space(8.);
                 let mut action = None;
                 egui::ScrollArea::horizontal()
                     .id_salt(id.with(("table_scroll", bi)))
@@ -1539,48 +1841,7 @@ fn show_blocks(ui: &mut egui::Ui, doc: &mut Document, id: Id) {
                     table_action(t, k, r, c);
                 }
             }
-            Block::Picture(p) => {
-                if p.texture.is_none() {
-                    p.texture = Some(ui.ctx().load_texture(
-                        id.with(("picture", bi)).short_debug_format(),
-                        egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.pixels),
-                        egui::TextureOptions::LINEAR,
-                    ));
-                }
-                let indent = (p.indent as f32 * font.size * 0.45).min(ui.available_width() * 0.4);
-                let available = (ui.available_width() - indent).max(30.);
-                let width = if p.fit {
-                    available
-                } else {
-                    (p.width as f32 * p.scale * doc.zoom).min(available)
-                };
-                let size = Vec2::new(width, width * p.height as f32 / p.width.max(1) as f32);
-                ui.horizontal_wrapped(|ui| {
-                    for (value, label) in [(0.25, "25%"), (0.5, "50%"), (0.75, "75%"), (1., "100%")]
-                    {
-                        if ui
-                            .selectable_label(!p.fit && p.scale == value, label)
-                            .clicked()
-                        {
-                            p.scale = value;
-                            p.fit = false;
-                        }
-                    }
-                    if ui.selectable_label(p.fit, "너비 맞춤").clicked() {
-                        p.fit = true;
-                    }
-                    ui.label(RichText::new("원본 비율 유지").small());
-                    if ui.small_button("×").on_hover_text("이미지 제거").clicked() {
-                        remove = Some(bi);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add_space(indent);
-                    if let Some(texture) = &p.texture {
-                        ui.image((texture.id(), size)).on_hover_text(&p.name);
-                    }
-                });
-            }
+            Block::Picture(_) => {}
         }
     }
     doc.selected_cell = selected;
@@ -1646,8 +1907,8 @@ fn picture_from_file(path: &Path, scale: f32, fit: bool) -> Result<Picture, Stri
         pixels: img.into_raw(),
         scale,
         fit,
-        indent: 0,
         texture: None,
+        id: 0,
     })
 }
 fn picture_from_clipboard(scale: f32, fit: bool) -> Result<Picture, String> {
@@ -1665,24 +1926,20 @@ fn picture_from_clipboard(scale: f32, fit: bool) -> Result<Picture, String> {
         pixels: image.bytes.into_owned(),
         scale,
         fit,
-        indent: 0,
         texture: None,
+        id: 0,
     })
+}
+pub fn is_picture(c: char) -> bool {
+    picture_id(c).is_some()
+}
+pub fn strip_pictures(text: &str) -> String {
+    text.chars().filter(|c| picture_id(*c).is_none()).collect()
 }
 fn char_byte(text: &str, index: usize) -> usize {
     text.char_indices()
         .nth(index)
         .map_or(text.len(), |(b, _)| b)
-}
-fn line_indent(text: &str, cursor: usize) -> usize {
-    let prefix = &text[..char_byte(text, cursor)];
-    prefix
-        .rsplit('\n')
-        .next()
-        .unwrap_or("")
-        .chars()
-        .take_while(|c| *c == ' ')
-        .count()
 }
 fn replace_chars(text: &mut String, range: Range<usize>, replacement: &str) {
     let a = char_byte(text, range.start);
@@ -2222,7 +2479,7 @@ mod tests {
     }
     #[test]
     fn icon_toolbar_fits_one_row_and_wraps_without_visible_text_controls() {
-        for (width, max_height) in [(360., 32.), (260., 64.)] {
+        for (width, max_height) in [(360., 32.), (200., 64.)] {
             let ctx = egui::Context::default();
             let mut doc = Document::default();
             let mut height = 0.;
@@ -2248,11 +2505,10 @@ mod tests {
                 height <= max_height,
                 "toolbar at width {width} used {height} px"
             );
+            // Only the font size number is drawn as text, as the design asks.
             assert!(
-                !output
-                    .shapes
-                    .iter()
-                    .any(|s| matches!(s.shape, egui::Shape::Text(_))),
+                !output.shapes.iter().any(|s| matches!(&s.shape,
+                    egui::Shape::Text(t) if !t.galley.job.text.chars().all(|c| c.is_ascii_digit()))),
                 "closed toolbar contains a text control"
             );
             assert_eq!(
@@ -2281,7 +2537,7 @@ mod tests {
                     .default_height(80.)
                     .frame(egui::Frame::NONE.inner_margin(8.))
                     .show(ctx, |ui| {
-                        footer_rect = footer(ui, &mut doc, "split_memo", 32.).rect;
+                        footer_rect = footer(ui, &mut doc, "split_memo", 32., false).rect;
                     });
                 egui::CentralPanel::default().show(ctx, |ui| {
                     body_rect = ui.available_rect_before_wrap();
@@ -2314,7 +2570,7 @@ mod tests {
         doc.delete_tab(0);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::TopBottomPanel::bottom("delete_footer").show(ctx, |ui| {
-                footer(ui, &mut doc, "delete_memo", 0.);
+                footer(ui, &mut doc, "delete_memo", 0., false);
             });
             egui::CentralPanel::default().show(ctx, |ui| {
                 content(ui, &mut legacy, &mut doc, "delete_memo");
@@ -2415,6 +2671,7 @@ mod tests {
                                 &mut doc,
                                 "status_document",
                                 if active { 32. } else { 0. },
+                                false,
                             )
                             .rect;
                         });
@@ -2437,5 +2694,116 @@ mod tests {
             assert_eq!(legacy, original);
         }
         assert!(errors.is_empty(), "{}", errors.join("\n"));
+    }
+}
+#[cfg(test)]
+mod inline_picture_tests {
+    use super::*;
+    fn picture(w: usize, h: usize) -> Picture {
+        Picture {
+            id: 0,
+            name: "test".into(),
+            pixels: vec![255; w * h * 4],
+            width: w,
+            height: h,
+            scale: 1.,
+            fit: false,
+            texture: None,
+        }
+    }
+    #[test]
+    fn pasted_picture_sits_in_the_text_and_follows_deletion() {
+        let mut tab = Tab::new("본문".into());
+        tab.body = "앞뒤".into();
+        let caret = tab.insert_picture(1..1, picture(40, 20));
+        assert_eq!(caret, 2);
+        assert_eq!(tab.body.chars().count(), 3);
+        assert!(is_picture(tab.body.chars().nth(1).unwrap()));
+        assert!(tab.shows(&tab.blocks[0]));
+        assert_eq!(strip_pictures(&tab.body), "앞뒤");
+        let second = tab.insert_picture(3..3, picture(10, 10));
+        assert_eq!(second, 4);
+        assert_ne!(tab.body.chars().nth(1), tab.body.chars().nth(3));
+        // Deleting the placeholder hides the picture from the note and its collections.
+        replace_chars(&mut tab.body, 1..2, "");
+        assert!(!tab.shows(&tab.blocks[0]));
+        assert!(tab.shows(&tab.blocks[1]));
+    }
+    #[test]
+    fn a_wrapped_fit_picture_is_drawn_below_the_text_before_it() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+        let mut tab = Tab::new("본문".into());
+        tab.body = "가나다라마바사아자차카타파하".into();
+        let at = tab.body.chars().count();
+        let mut p = picture(400, 200);
+        p.fit = true;
+        tab.insert_picture(at..at, p);
+        let font = FontId::proportional(14.);
+        let ratio = ctx.fonts(|f| f.glyph_width(&FontId::proportional(100.), '\u{3000}')) / 100.;
+        let mut job = layout(
+            &tab.body,
+            &[],
+            &Format::default(),
+            font.clone(),
+            font,
+            Color32::BLACK,
+        );
+        let wrap = 200.;
+        job.wrap.max_width = wrap;
+        let sizes = picture_sizes(&tab, 1.);
+        inline_pictures(&mut job, &sizes, wrap, ratio);
+        let galley = ctx.fonts(|f| f.layout_job(job));
+        assert!(galley.rows.len() >= 2, "the picture wraps onto its own row");
+        let text_bottom = galley.rows[0].rect.max.y;
+        let rect = picture_rect(&galley, at, sizes[0].at(wrap));
+        assert!(
+            rect.min.y >= text_bottom - 0.5,
+            "{rect:?} overlaps text ending at {text_bottom}"
+        );
+    }
+    #[test]
+    fn layout_reserves_the_picture_size_and_keeps_byte_ranges_valid() {
+        let mut tab = Tab::new("본문".into());
+        tab.body = "가".into();
+        tab.insert_picture(1..1, picture(80, 40));
+        tab.body.push('나');
+        let sizes = picture_sizes(&tab, 1.);
+        let font = FontId::proportional(14.);
+        let mut job = layout(
+            &tab.body,
+            &[],
+            &Format::default(),
+            font.clone(),
+            font,
+            Color32::BLACK,
+        );
+        inline_pictures(&mut job, &sizes, 300., 1.);
+        assert_eq!(job.text, "가\u{3000}나");
+        for s in &job.sections {
+            assert!(job.text.get(s.byte_range.clone()).is_some());
+        }
+        let image = &job.sections[1].format;
+        assert_eq!(image.font_id.size, 80.);
+        assert_eq!(image.line_height, Some(44.));
+        assert_eq!(image.color, Color32::TRANSPARENT);
+        // Fit-to-width follows the wrap width.
+        if let Block::Picture(p) = &mut tab.blocks[0] {
+            p.fit = true;
+        }
+        let fit = picture_sizes(&tab, 1.)[0].at(201.);
+        assert_eq!(fit, Vec2::new(196., 98.));
+    }
+    #[test]
+    fn plain_text_and_title_inference_skip_picture_placeholders() {
+        let mut doc = Document::default();
+        doc.tabs[0].insert_picture(0..0, picture(4, 4));
+        let mut body = doc.tabs[0].body.clone() + "제목 줄\n본문";
+        assert_eq!(doc.plain_text(&body), "제목 줄\n본문");
+        let mut title = String::new();
+        crate::desktop::infer_title(&mut title, &mut body);
+        assert_eq!(title, "제목 줄");
+        assert_eq!(body.chars().filter(|c| is_picture(*c)).count(), 1);
+        assert!(body.ends_with("본문"));
     }
 }
