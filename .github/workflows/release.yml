@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing UI preview tag, e.g. v0.2.0-ui-preview'
+        description: 'Existing UI preview tag, e.g. v0.2.0-ui-preview.1'
         required: true
-        default: v0.2.0-ui-preview
+        default: v0.2.0-ui-preview.1
 
 permissions:
   contents: read
@@ -106,7 +106,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -LiteralPath "target/$env:TARGET/release/memonoking.exe" -Destination (Join-Path $stage 'MEMONOKING.exe')
           $readme = (Get-Content -LiteralPath 'packaging/README.md' -Raw -Encoding utf8).Split('## 개발자용 패키징')[0].TrimEnd()
-          $readme.Replace('0.2.0-ui-preview', $env:RELEASE_LABEL) | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
+          $readme.Replace('0.2.0-ui-preview.1', $env:RELEASE_LABEL) | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
           $hashes = @('MEMONOKING.exe', 'README.txt') | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage $_)).Hash.ToLowerInvariant()
             "$hash  $_"
@@ -123,18 +123,72 @@ jobs:
       - name: Locate or install Inno Setup compiler
         run: |
           $ErrorActionPreference = 'Stop'
+          function Read-InnoEngineVersion([string] $Output) {
+            $match = [regex]::Match($Output, '(?im)^\s*Compiler engine version:\s*Inno Setup\s+(\d+\.\d+\.\d+(?:\.\d+)?)\b')
+            if ($match.Success) { return [version]$match.Groups[1].Value }
+            return $null
+          }
+          function Invoke-InnoCommand([string] $Path, [string[]] $Arguments, [string] $InputText) {
+            # /? writes its usage text to stderr even on success. Capture it
+            # without turning that expected output into a PowerShell error.
+            $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
+            try {
+              $lines = if ($PSBoundParameters.ContainsKey('InputText')) {
+                $InputText | & $Path @Arguments 2>&1
+              } else {
+                & $Path @Arguments 2>&1
+              }
+              return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($lines | ForEach-Object { $_.ToString() }) -join "`n" }
+            } catch {
+              return [pscustomobject]@{ ExitCode = -1; Output = $_.Exception.Message }
+            }
+          }
+          function Get-InnoEngineVersion([string] $Path) {
+            $help = Invoke-InnoCommand -Path $Path -Arguments @('/?')
+            if ($help.ExitCode -ne 0 -or $help.Output -notmatch '(?im)^Inno Setup \d+(?:\.\d+)*(?: \(32-bit\))? Command-Line Compiler\s*$') {
+              Write-Host "Rejected non-ISCC or unusable compiler: $Path"
+              return $null
+            }
+            # Inno 6's /? banner identifies only its major version. Its EXE
+            # version resource can be 0.0.0.0. A no-output stdin compile reports
+            # the loaded engine's real version, without creating an installer.
+            # Official source: jrsoftware/issrc, is-6_7_1/Projects/ISCC.dpr,
+            # ShowBanner and Go's 'Compiler engine version:' status line.
+            $probe = "[Setup]`nAppName=MEMONOKING Compiler Probe`nAppVersion=0.0.0`nDefaultDirName={tmp}\MEMONOKING-CompilerProbe`nOutput=no`nUninstallable=no`n"
+            $result = Invoke-InnoCommand -Path $Path -Arguments @('/O-', '-') -InputText $probe
+            $version = Read-InnoEngineVersion -Output $result.Output
+            if ($result.ExitCode -ne 0 -or $null -eq $version -or $version -lt [version]'6.3.0') {
+              Write-Host "Rejected compiler (requires working Inno Setup 6.3+): $Path"
+              Write-Host $result.Output
+              return $null
+            }
+            Write-Host "Selected Inno Setup engine $version at $Path"
+            return $version
+          }
           function Find-InnoCompiler {
-            $candidates = @(
-              (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'),
-              (Join-Path $env:ProgramFiles 'Inno Setup 6/ISCC.exe')
-            )
-            $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-            if ($onPath) { $candidates += $onPath.Source }
-            return $candidates | Where-Object {
-              if (-not (Test-Path -LiteralPath $_)) { return $false }
-              $version = (Get-Item -LiteralPath $_).VersionInfo
-              return $version.FileMajorPart -gt 6 -or ($version.FileMajorPart -eq 6 -and $version.FileMinorPart -ge 3)
-            } | Select-Object -First 1
+            $roots = @(${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique
+            $candidates = @()
+            foreach ($root in $roots) {
+              $candidates += Join-Path $root 'Inno Setup 6/ISCC.exe'
+              $candidates += Join-Path $root 'Inno Setup 7/ISCC.exe'
+            }
+            $onPath = @(Get-Command ISCC.exe -CommandType Application -All -ErrorAction SilentlyContinue)
+            $candidates += $onPath | ForEach-Object { $_.Source }
+            # Search only immediate Inno Setup directories below Program Files,
+            # then at most two levels inside them; never scan user/source trees.
+            foreach ($root in $roots) {
+              if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
+              foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory -Filter 'Inno Setup*' -ErrorAction SilentlyContinue)) {
+                $candidates += Get-ChildItem -LiteralPath $directory.FullName -File -Filter 'ISCC.exe' -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+              }
+            }
+            foreach ($candidate in @($candidates | Select-Object -Unique)) {
+              if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and $null -ne (Get-InnoEngineVersion -Path $candidate)) {
+                return $candidate
+              }
+            }
+            return $null
           }
           $compiler = Find-InnoCompiler
           if (-not $compiler) {

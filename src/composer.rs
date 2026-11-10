@@ -956,136 +956,160 @@ const TOOLS: [Tool; 10] = [
     Tool::Opacity,
     Tool::Zoom,
 ];
-#[cfg(test)]
 fn toolbar_height(width: f32) -> f32 {
     let columns = (((width.max(28.) + 2.) / 30.).floor() as usize).clamp(1, TOOLS.len());
     let rows = TOOLS.len().div_ceil(columns);
     rows as f32 * 28. + rows.saturating_sub(1) as f32 * 2.
 }
 fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(2.);
-        ui.spacing_mut().button_padding = Vec2::new(6., 4.);
-        ui.set_max_width(ui.available_width().min(ui.clip_rect().width()).max(28.));
-        ui.horizontal_wrapped(|ui| {
-            for tool in TOOLS {
-                let (label, selected) = match tool {
-                    Tool::Font => (format!("글꼴 · {}", doc.font_name), false),
-                    Tool::Size => (format!("글자 크기 · {:.0} pt", doc.font_size * 0.75), false),
-                    Tool::Bold => ("굵게 · Ctrl+B".into(), doc.format.bold),
-                    Tool::Italic => ("기울임 · Ctrl+I".into(), doc.format.italic),
-                    Tool::Underline => ("밑줄 · Ctrl+U".into(), doc.format.underline),
-                    Tool::Strike => ("취소선".into(), doc.format.strike),
-                    Tool::Table => ("표 삽입".into(), false),
-                    Tool::Image => ("이미지 삽입".into(), false),
-                    Tool::Opacity => (format!("메모 투명도 · {:.0}%", doc.opacity * 100.), false),
-                    Tool::Zoom => (
-                        format!("본문 배율 · {:.0}% · Ctrl+휠", doc.zoom * 100.),
-                        false,
-                    ),
-                };
-                let response = tool_button(ui, tool, &label, selected);
-                match tool {
-                    Tool::Bold | Tool::Italic | Tool::Underline | Tool::Strike => {
-                        if response.clicked() {
-                            doc.toggle_format(match tool {
-                                Tool::Bold => 0,
-                                Tool::Italic => 1,
-                                Tool::Underline => 2,
-                                _ => 3,
-                            });
+    let width = ui.available_width().min(ui.clip_rect().width()).max(28.);
+    let height = toolbar_height(width);
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(2.);
+            ui.spacing_mut().button_padding = Vec2::new(6., 4.);
+            ui.set_max_width(ui.available_width().min(ui.clip_rect().width()).max(28.));
+            ui.horizontal_wrapped(|ui| {
+                for tool in TOOLS {
+                    let (label, selected) = match tool {
+                        Tool::Font => (format!("글꼴 · {}", doc.font_name), false),
+                        Tool::Size => {
+                            (format!("글자 크기 · {:.0} pt", doc.font_size * 0.75), false)
                         }
-                    }
-                    _ => {
-                        let popup_id = id.with(("tool_popup", tool));
-                        if response.clicked() {
-                            ui.memory_mut(|m| m.toggle_popup(popup_id));
+                        Tool::Bold => ("굵게 · Ctrl+B".into(), doc.format.bold),
+                        Tool::Italic => ("기울임 · Ctrl+I".into(), doc.format.italic),
+                        Tool::Underline => ("밑줄 · Ctrl+U".into(), doc.format.underline),
+                        Tool::Strike => ("취소선".into(), doc.format.strike),
+                        Tool::Table => ("표 삽입".into(), false),
+                        Tool::Image => ("이미지 삽입".into(), false),
+                        Tool::Opacity => {
+                            (format!("메모 투명도 · {:.0}%", doc.opacity * 100.), false)
                         }
-                        egui::popup_below_widget(
-                            ui,
-                            popup_id,
-                            &response,
-                            egui::PopupCloseBehavior::CloseOnClickOutside,
-                            |ui| {
-                                ui.set_min_width(170.);
-                                match tool {
-                                    Tool::Font => {
-                                        ui.strong("글꼴");
-                                        for name in [
-                                            "맑은 고딕",
-                                            "굴림",
-                                            "돋움",
-                                            "바탕",
-                                            "궁서체",
-                                            "개구쟁이",
-                                        ] {
-                                            if ui
-                                                .selectable_label(doc.font_name == name, name)
-                                                .clicked()
-                                            {
-                                                doc.font_name = name.into();
-                                                ui.memory_mut(|m| m.close_popup());
-                                            }
-                                        }
-                                    }
-                                    Tool::Size => {
-                                        ui.strong("글자 크기");
-                                        ui.horizontal_wrapped(|ui| {
-                                            for pt in
-                                                [8., 10., 11., 12., 14., 16., 18., 20., 24., 32.]
-                                            {
+                        Tool::Zoom => (
+                            format!("본문 배율 · {:.0}% · Ctrl+휠", doc.zoom * 100.),
+                            false,
+                        ),
+                    };
+                    let response = tool_button(ui, tool, &label, selected);
+                    match tool {
+                        Tool::Bold | Tool::Italic | Tool::Underline | Tool::Strike => {
+                            if response.clicked() {
+                                doc.toggle_format(match tool {
+                                    Tool::Bold => 0,
+                                    Tool::Italic => 1,
+                                    Tool::Underline => 2,
+                                    _ => 3,
+                                });
+                            }
+                        }
+                        _ => {
+                            let popup_id = id.with(("tool_popup", tool));
+                            if response.clicked() {
+                                ui.memory_mut(|m| m.toggle_popup(popup_id));
+                            }
+                            egui::popup_below_widget(
+                                ui,
+                                popup_id,
+                                &response,
+                                egui::PopupCloseBehavior::CloseOnClickOutside,
+                                |ui| {
+                                    ui.set_min_width(170.);
+                                    match tool {
+                                        Tool::Font => {
+                                            ui.strong("글꼴");
+                                            for name in [
+                                                "맑은 고딕",
+                                                "굴림",
+                                                "돋움",
+                                                "바탕",
+                                                "궁서체",
+                                                "개구쟁이",
+                                            ] {
                                                 if ui
-                                                    .selectable_label(
-                                                        (doc.font_size * 0.75 - pt).abs() < 0.1,
-                                                        format!("{pt:.0} pt"),
-                                                    )
+                                                    .selectable_label(doc.font_name == name, name)
                                                     .clicked()
                                                 {
-                                                    doc.font_size = pt / 0.75;
+                                                    doc.font_name = name.into();
                                                     ui.memory_mut(|m| m.close_popup());
                                                 }
                                             }
-                                        });
-                                        ui.separator();
-                                        let mut pt = (doc.font_size * 0.75).round();
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut pt)
-                                                    .range(6.0..=48.0)
-                                                    .speed(1.)
-                                                    .fixed_decimals(0)
-                                                    .suffix(" pt"),
-                                            )
-                                            .changed()
-                                        {
-                                            doc.font_size = pt.round() / 0.75;
                                         }
-                                    }
-                                    Tool::Table => {
-                                        ui.strong("표 삽입");
-                                        ui.horizontal(|ui| {
-                                            for (rows, cols) in [(2, 2), (3, 3), (3, 4)] {
-                                                if ui.button(format!("{rows} × {cols}")).clicked()
-                                                {
-                                                    doc.tabs[doc.active]
-                                                        .blocks
-                                                        .push(Block::Table(Table::new(rows, cols)));
-                                                    ui.memory_mut(|m| m.close_popup());
+                                        Tool::Size => {
+                                            ui.strong("글자 크기");
+                                            ui.horizontal_wrapped(|ui| {
+                                                for pt in [
+                                                    8., 10., 11., 12., 14., 16., 18., 20., 24., 32.,
+                                                ] {
+                                                    if ui
+                                                        .selectable_label(
+                                                            (doc.font_size * 0.75 - pt).abs() < 0.1,
+                                                            format!("{pt:.0} pt"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        doc.font_size = pt / 0.75;
+                                                        ui.memory_mut(|m| m.close_popup());
+                                                    }
                                                 }
-                                            }
-                                        });
-                                        ui.separator();
-                                        ui.label("복사한 표는 Ctrl+V로 붙일 수 있습니다.");
-                                    }
-                                    Tool::Image => {
-                                        ui.strong("이미지 삽입");
-                                        if ui.button("파일에서 추가…").clicked() {
-                                            if let Some(path) = rfd::FileDialog::new()
-                                                .add_filter("이미지", &["png", "jpg", "jpeg"])
-                                                .pick_file()
+                                            });
+                                            ui.separator();
+                                            let mut pt = (doc.font_size * 0.75).round();
+                                            if ui
+                                                .add(
+                                                    egui::DragValue::new(&mut pt)
+                                                        .range(6.0..=48.0)
+                                                        .speed(1.)
+                                                        .fixed_decimals(0)
+                                                        .suffix(" pt"),
+                                                )
+                                                .changed()
                                             {
-                                                match picture_from_file(
-                                                    &path,
+                                                doc.font_size = pt.round() / 0.75;
+                                            }
+                                        }
+                                        Tool::Table => {
+                                            ui.strong("표 삽입");
+                                            ui.horizontal(|ui| {
+                                                for (rows, cols) in [(2, 2), (3, 3), (3, 4)] {
+                                                    if ui
+                                                        .button(format!("{rows} × {cols}"))
+                                                        .clicked()
+                                                    {
+                                                        doc.tabs[doc.active].blocks.push(
+                                                            Block::Table(Table::new(rows, cols)),
+                                                        );
+                                                        ui.memory_mut(|m| m.close_popup());
+                                                    }
+                                                }
+                                            });
+                                            ui.separator();
+                                            ui.label("복사한 표는 Ctrl+V로 붙일 수 있습니다.");
+                                        }
+                                        Tool::Image => {
+                                            ui.strong("이미지 삽입");
+                                            if ui.button("파일에서 추가…").clicked() {
+                                                if let Some(path) = rfd::FileDialog::new()
+                                                    .add_filter("이미지", &["png", "jpg", "jpeg"])
+                                                    .pick_file()
+                                                {
+                                                    match picture_from_file(
+                                                        &path,
+                                                        doc.image_scale,
+                                                        doc.image_fit,
+                                                    ) {
+                                                        Ok(p) => doc.tabs[doc.active]
+                                                            .blocks
+                                                            .push(Block::Picture(p)),
+                                                        Err(e) => doc.status = e,
+                                                    }
+                                                }
+                                                ui.memory_mut(|m| m.close_popup());
+                                            }
+                                            if ui.button("클립보드 이미지 붙이기").clicked()
+                                            {
+                                                match picture_from_clipboard(
                                                     doc.image_scale,
                                                     doc.image_fit,
                                                 ) {
@@ -1094,68 +1118,56 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
                                                         .push(Block::Picture(p)),
                                                     Err(e) => doc.status = e,
                                                 }
+                                                ui.memory_mut(|m| m.close_popup());
                                             }
-                                            ui.memory_mut(|m| m.close_popup());
                                         }
-                                        if ui.button("클립보드 이미지 붙이기").clicked() {
-                                            match picture_from_clipboard(
-                                                doc.image_scale,
-                                                doc.image_fit,
-                                            ) {
-                                                Ok(p) => doc.tabs[doc.active]
-                                                    .blocks
-                                                    .push(Block::Picture(p)),
-                                                Err(e) => doc.status = e,
-                                            }
-                                            ui.memory_mut(|m| m.close_popup());
-                                        }
-                                    }
-                                    Tool::Opacity => {
-                                        ui.strong("메모 투명도");
-                                        ui.add(
-                                            egui::Slider::new(&mut doc.opacity, 0.2..=1.)
-                                                .show_value(false),
-                                        );
-                                        ui.label(format!("{:.0}%", doc.opacity * 100.));
-                                    }
-                                    Tool::Zoom => {
-                                        ui.strong("본문 배율");
-                                        ui.horizontal_wrapped(|ui| {
-                                            for zoom in [0.3, 0.5, 0.75, 1., 1.25, 1.5, 2.] {
-                                                if ui
-                                                    .selectable_label(
-                                                        (doc.zoom - zoom).abs() < 0.01,
-                                                        format!("{:.0}%", zoom * 100.),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    doc.zoom = zoom;
-                                                    doc.zoom_until = ui.input(|i| i.time) + 0.9;
-                                                    ui.memory_mut(|m| m.close_popup());
-                                                }
-                                            }
-                                        });
-                                        ui.separator();
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(&mut doc.zoom, 0.3..=2.)
+                                        Tool::Opacity => {
+                                            ui.strong("메모 투명도");
+                                            ui.add(
+                                                egui::Slider::new(&mut doc.opacity, 0.2..=1.)
                                                     .show_value(false),
-                                            )
-                                            .changed()
-                                        {
-                                            doc.zoom_until = ui.input(|i| i.time) + 0.9;
+                                            );
+                                            ui.label(format!("{:.0}%", doc.opacity * 100.));
                                         }
-                                        ui.label("Ctrl+휠로도 조절할 수 있습니다.");
+                                        Tool::Zoom => {
+                                            ui.strong("본문 배율");
+                                            ui.horizontal_wrapped(|ui| {
+                                                for zoom in [0.3, 0.5, 0.75, 1., 1.25, 1.5, 2.] {
+                                                    if ui
+                                                        .selectable_label(
+                                                            (doc.zoom - zoom).abs() < 0.01,
+                                                            format!("{:.0}%", zoom * 100.),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        doc.zoom = zoom;
+                                                        doc.zoom_until = ui.input(|i| i.time) + 0.9;
+                                                        ui.memory_mut(|m| m.close_popup());
+                                                    }
+                                                }
+                                            });
+                                            ui.separator();
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(&mut doc.zoom, 0.3..=2.)
+                                                        .show_value(false),
+                                                )
+                                                .changed()
+                                            {
+                                                doc.zoom_until = ui.input(|i| i.time) + 0.9;
+                                            }
+                                            ui.label("Ctrl+휠로도 조절할 수 있습니다.");
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
-                                }
-                            },
-                        );
+                                },
+                            );
+                        }
                     }
                 }
-            }
-        });
-    })
+            });
+        },
+    )
     .response
 }
 fn tool_button(ui: &mut egui::Ui, tool: Tool, label: &str, selected: bool) -> egui::Response {
@@ -2311,6 +2323,38 @@ mod tests {
         assert_eq!(legacy, "살아 있는 본문");
         assert_eq!(doc.tabs[0].body, "살아 있는 본문");
         assert_eq!(doc.trash[0].body, "지워진 첫 본문");
+    }
+    #[test]
+    fn wrapped_tools_stay_inside_a_bottom_up_inline_preview() {
+        for width in [220., 260., 300.] {
+            let ctx = egui::Context::default();
+            let mut doc = Document::default();
+            let mut bounds = egui::Rect::NOTHING;
+            let mut tools = egui::Rect::NOTHING;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(width, 240.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE.inner_margin(20.))
+                        .show(ctx, |ui| {
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                                bounds = ui.max_rect();
+                                tools = toolbar(ui, &mut doc, Id::new("inline_tools_bounds")).rect;
+                            });
+                        });
+                },
+            );
+            assert!(
+                bounds.expand(0.5).contains_rect(tools),
+                "width={width}: tools={tools:?}, bounds={bounds:?}"
+            );
+        }
     }
     #[test]
     fn status_line_footer_keeps_tools_tabs_and_body_inside_active_and_passive_bounds() {

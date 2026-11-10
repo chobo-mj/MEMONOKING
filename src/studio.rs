@@ -214,112 +214,402 @@ impl App {
             if w.applied.is_none() {
                 builder = builder.with_inner_size(size);
             }
-            root.show_viewport_immediate(viewport(i),builder,|ctx,_|{
+            root.show_viewport_immediate(viewport(i), builder, |ctx, _| {
                 self.theme(ctx);
-                let maximized=ctx.input(|v|v.viewport().maximized.unwrap_or(false));
-                if w.applied!=Some(key) {
+                let maximized = ctx.input(|v| v.viewport().maximized.unwrap_or(false));
+                let changed = w.applied != Some(key);
+                if changed {
                     w.native.cancel();
-                    if maximized{ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));}
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min));ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(max));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(!locked));
-                    w.applied=Some(key);
+                    if maximized {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(max));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(!locked));
+                    w.applied = Some(key);
                 } else if !maximized {
-                    if let Some(rect)=ctx.input(|v|v.viewport().inner_rect){
-                        if rect.width()>=min.x && rect.height()>=min.y{
-                            match mode{Mode::Editor=>w.full_size=rect.size(),Mode::Sticker=>w.sticker_size=rect.size(),Mode::Title=>w.title_width=rect.width(),Mode::Swatch=>w.swatch_size=rect.size()}
+                    if let Some(rect) = ctx.input(|v| v.viewport().inner_rect) {
+                        if rect.width() >= min.x && rect.height() >= min.y {
+                            match mode {
+                                Mode::Editor => w.full_size = rect.size(),
+                                Mode::Sticker => w.sticker_size = rect.size(),
+                                Mode::Title => w.title_width = rect.width(),
+                                Mode::Swatch => w.swatch_size = rect.size(),
+                            }
                         }
                     }
                 }
-                if w.center{if let Some(cmd)=egui::ViewportCommand::center_on_screen(ctx){ctx.send_viewport_cmd(cmd);}w.center=false;}
-                if w.focus{ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));ctx.send_viewport_cmd(egui::ViewportCommand::Focus);w.focus=false;}
-                if ctx.input(|v|v.viewport().close_requested()){w.open=false;}
-                self.memo_shortcuts(ctx,i,&mut w);
-                w.native.input(ctx,mode==Mode::Title,mode==Mode::Swatch,!locked && !maximized);
-                let base=self.data.notes[i].color;
-                let paper=mix(base,Color32::WHITE,(1.-self.data.notes[i].document.opacity).clamp(0.,0.9));
-                if mode==Mode::Title {
-                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(mix(base,Color32::WHITE,0.2)).corner_radius(7.).inner_margin(6.)).show(ctx,|ui|{
-                        paper_style(ui,paper);
-                        let hover=!self.desktop.auto_toolbar||ui.rect_contains_pointer(ui.max_rect());
-                        ui.horizontal(|ui|{
-                            if hover && icon_button(ui,Icon::Fold,"색상 상자로 접기").clicked(){w.fold();}
-                            let width=(ui.available_width()-if hover{32.}else{0.}).max(40.);
-                            let r=ui.add_sized([width,28.],egui::Label::new(&self.data.notes[i].title).truncate().sense(Sense::click_and_drag())).on_hover_text("클릭: 스티커 · 드래그: 이동 · 양끝: 폭 조절");
-                            if r.clicked(){w.sticker();} else if r.drag_started(){w.native.start_drag(ctx);}
-                            if hover{pin_button(ui,&mut self.data.notes[i].topmost);}
-                        });
-                    });
-                } else if mode==Mode::Swatch {
-                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(base).corner_radius(8.)).show(ctx,|ui|{
-                        let rect=ui.max_rect();let r=ui.interact(rect.shrink(7.),ui.id().with("swatch"),Sense::click_and_drag());
-                        if locked{crate::icons::paint_icon(ui.painter(),Rect::from_center_size(rect.center(),Vec2::splat(28.)),Icon::Lock,INK);}
-                        if r.drag_started(){w.native.start_drag(ctx);}
-                        if r.double_clicked(){if locked{self.ask_unlock(i,true);}else{w.sticker();}}
-                        r.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(if locked{"잠긴 메모 · 두 번 클릭해 열기"}else{"두 번 클릭: 펼치기 · 드래그: 이동 · 모서리: 크기 · Shift: 정사각형"}).context_menu(|ui|{
-                            if locked && ui.button("잠금 해제").clicked(){self.ask_unlock(i,true);ui.close_menu();}
-                            if ui.button("스티커 표시 해제").clicked(){w.open=false;ui.close_menu();}
-                        });
-                    });
-                } else {
-                    let focused=ctx.input(|v|v.viewport().focused.unwrap_or(false));
-                    let engaged=mode==Mode::Editor || !self.desktop.auto_toolbar || focused || ctx.input(|v|v.pointer.hover_pos().is_some());
-                    egui::TopBottomPanel::top(egui::Id::new(("memo_header",i))).exact_height(36.).frame(egui::Frame::NONE.fill(if mode==Mode::Sticker{paper}else{ctx.style().visuals.panel_fill}).corner_radius(egui::CornerRadius{nw:12,ne:12,sw:0,se:0}).inner_margin(egui::Margin::symmetric(10,4))).show(ctx,|ui|{
-                        if mode==Mode::Sticker{paper_style(ui,paper);}
-                        self.memo_header(ui,i,&mut w,mode,engaged,maximized);
-                    });
-                    if self.active!=i {self.active=i;self.extra.edit_occurrence=w.occurrence;}
-                    egui::TopBottomPanel::top(egui::Id::new(("memo_title",i))).frame(egui::Frame::NONE.fill(if mode==Mode::Sticker{paper}else{ctx.style().visuals.panel_fill}).inner_margin(egui::Margin::symmetric(12,5))).show(ctx,|ui|{
-                        if mode==Mode::Sticker {
-                            paper_style(ui,paper);
-                            let font=egui::FontId::new(21.,crate::desktop::family(ui,&self.data.notes[i].document.font_name));
-                            ui.add(egui::TextEdit::singleline(&mut self.data.notes[i].title).font(font).frame(false).desired_width(f32::INFINITY).hint_text("제목"));
-                        }else{self.note_editor(ui);}
-                    });
-                    let width=ctx.input(|v|v.viewport().inner_rect.map(|r|r.width())).unwrap_or(size.x);
-                    let status_height = if self.data.notes[i].document.status.is_empty() { 0. } else { let small_font = egui::TextStyle::Small.resolve(&ctx.style()); ctx.fonts(|f| f.row_height(&small_font)) + 4. };
-                    let footer_height=(if engaged {if width>=354.{92.}else{122.}}else{48.}) + status_height;
-                    egui::TopBottomPanel::bottom(egui::Id::new(("memo_footer",i))).exact_height(footer_height).frame(egui::Frame::NONE.fill(if mode==Mode::Sticker{paper}else{ctx.style().visuals.panel_fill}).corner_radius(egui::CornerRadius{nw:0,ne:0,sw:12,se:12}).inner_margin(egui::Margin::symmetric(12,6))).show(ctx,|ui|{
-                        if mode==Mode::Sticker{paper_style(ui,paper);}
-                        self.data.notes[i].document.toolbar_visible=engaged;
-                        let rect=ui.max_rect();
-                        crate::composer::footer(ui,&mut self.data.notes[i].document,("memo_document",i),if engaged{32.}else{0.});
-                        if engaged{
-                            let arrow=Rect::from_min_size(Pos2::new(rect.right()-28.,rect.bottom()-28.),Vec2::splat(28.));
-                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrow),|ui|{
-                                if icon_button(ui,Icon::ChevronRight,"연결된 메모").clicked(){w.related = !w.related;}
+                if changed || w.center {
+                    if let Some(area) = crate::native_window::work_area(ctx) {
+                        let position = if w.center {
+                            area.center() - size * 0.5
+                        } else {
+                            ctx.input(|v| v.viewport().outer_rect.map(|r| r.min))
+                                .unwrap_or(area.min)
+                        };
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                            crate::native_window::fit_position(position, size, area),
+                        ));
+                    } else if w.center {
+                        if let Some(cmd) = egui::ViewportCommand::center_on_screen(ctx) {
+                            ctx.send_viewport_cmd(cmd);
+                        }
+                    }
+                    w.center = false;
+                }
+                if w.focus {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    w.focus = false;
+                }
+                if ctx.input(|v| v.viewport().close_requested()) {
+                    w.open = false;
+                }
+                self.memo_shortcuts(ctx, i, &mut w);
+                w.native.input(
+                    ctx,
+                    mode == Mode::Title,
+                    mode == Mode::Swatch,
+                    !locked && !maximized,
+                    min,
+                    max,
+                );
+                let base = self.data.notes[i].color;
+                let paper = mix(
+                    base,
+                    Color32::WHITE,
+                    (1. - self.data.notes[i].document.opacity).clamp(0., 0.9),
+                );
+                if mode == Mode::Title {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(mix(base, Color32::WHITE, 0.2))
+                                .corner_radius(7.)
+                                .inner_margin(6.),
+                        )
+                        .show(ctx, |ui| {
+                            paper_style(ui, paper);
+                            let hover = !self.desktop.auto_toolbar
+                                || ui.rect_contains_pointer(ui.max_rect());
+                            ui.horizontal(|ui| {
+                                if hover
+                                    && icon_button(ui, Icon::Fold, "색상 상자로 접기").clicked()
+                                {
+                                    w.fold();
+                                }
+                                let width = (ui.available_width()
+                                    - if hover {
+                                        2. * (28. + ui.spacing().item_spacing.x)
+                                    } else {
+                                        0.
+                                    })
+                                .max(40.);
+                                let r = ui
+                                    .add_sized(
+                                        [width, 28.],
+                                        egui::Label::new(if self.data.notes[i].title.is_empty() {
+                                            "새 메모"
+                                        } else {
+                                            &self.data.notes[i].title
+                                        })
+                                        .truncate()
+                                        .sense(Sense::click_and_drag()),
+                                    )
+                                    .on_hover_text("클릭: 스티커 · 드래그: 이동 · 양끝: 폭 조절");
+                                if r.clicked() {
+                                    w.sticker();
+                                } else if r.drag_started() || r.drag_stopped() {
+                                    w.native.start_drag(ctx);
+                                }
+                                if hover {
+                                    if icon_button(ui, Icon::Edit, "메모 상세 편집").clicked()
+                                    {
+                                        w.edit();
+                                    }
+                                    pin_button(ui, &mut self.data.notes[i].topmost);
+                                }
                             });
+                        });
+                } else if mode == Mode::Swatch {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE.fill(base).corner_radius(8.))
+                        .show(ctx, |ui| {
+                            let rect = ui.max_rect();
+                            let r = ui.interact(
+                                rect.shrink(7.),
+                                ui.id().with("swatch"),
+                                Sense::click_and_drag(),
+                            );
+                            if locked {
+                                crate::icons::paint_icon(
+                                    ui.painter(),
+                                    Rect::from_center_size(rect.center(), Vec2::splat(28.)),
+                                    Icon::Lock,
+                                    INK,
+                                );
+                            }
+                            if r.drag_started() || r.drag_stopped() {
+                                w.native.start_drag(ctx);
+                            }
+                            if r.double_clicked() {
+                                if locked {
+                                    self.ask_unlock(i, true);
+                                } else {
+                                    w.sticker();
+                                }
+                            }
+                            r.on_hover_cursor(egui::CursorIcon::Grab)
+                                .context_menu(|ui| {
+                                    if locked && ui.button("잠금 해제").clicked() {
+                                        self.ask_unlock(i, true);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("스티커 표시 해제").clicked() {
+                                        w.open = false;
+                                        ui.close_menu();
+                                    }
+                                });
+                        });
+                } else {
+                    let focused = ctx.input(|v| v.viewport().focused.unwrap_or(false));
+                    let engaged = mode == Mode::Editor
+                        || !self.desktop.auto_toolbar
+                        || focused
+                        || ctx.input(|v| v.pointer.hover_pos().is_some());
+                    egui::TopBottomPanel::top(egui::Id::new(("memo_header", i)))
+                        .exact_height(36.)
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(if mode == Mode::Sticker {
+                                    paper
+                                } else {
+                                    ctx.style().visuals.panel_fill
+                                })
+                                .corner_radius(egui::CornerRadius {
+                                    nw: 12,
+                                    ne: 12,
+                                    sw: 0,
+                                    se: 0,
+                                })
+                                .inner_margin(egui::Margin::symmetric(10, 4)),
+                        )
+                        .show(ctx, |ui| {
+                            if mode == Mode::Sticker {
+                                paper_style(ui, paper);
+                            }
+                            self.memo_header(ui, i, &mut w, mode, engaged, maximized);
+                        });
+                    if self.active != i {
+                        self.active = i;
+                        self.extra.edit_occurrence = w.occurrence;
+                    }
+                    egui::TopBottomPanel::top(egui::Id::new(("memo_title", i)))
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(if mode == Mode::Sticker {
+                                    paper
+                                } else {
+                                    ctx.style().visuals.panel_fill
+                                })
+                                .inner_margin(egui::Margin::symmetric(12, 5)),
+                        )
+                        .show(ctx, |ui| {
+                            if mode == Mode::Sticker {
+                                paper_style(ui, paper);
+                                let font = egui::FontId::new(
+                                    21.,
+                                    crate::desktop::family(
+                                        ui,
+                                        &self.data.notes[i].document.font_name,
+                                    ),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.data.notes[i].title)
+                                        .font(font)
+                                        .frame(false)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("제목"),
+                                );
+                            } else {
+                                self.note_editor(ui);
+                            }
+                        });
+                    let width = ctx
+                        .input(|v| v.viewport().inner_rect.map(|r| r.width()))
+                        .unwrap_or(size.x);
+                    let status_height = if self.data.notes[i].document.status.is_empty() {
+                        0.
+                    } else {
+                        let small_font = egui::TextStyle::Small.resolve(&ctx.style());
+                        ctx.fonts(|f| f.row_height(&small_font)) + 4.
+                    };
+                    let footer_height = (if engaged {
+                        if width >= 354. {
+                            92.
+                        } else {
+                            122.
                         }
-                    });
-                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(if mode==Mode::Sticker{paper}else{ctx.style().visuals.panel_fill}).inner_margin(egui::Margin::symmetric(12,4))).show(ctx,|ui|{
-                        if mode==Mode::Sticker{paper_style(ui,paper);}
-                        let n=&mut self.data.notes[i];
-                        crate::composer::content(ui,&mut n.body,&mut n.document,("memo_document",i));
-                    });
+                    } else {
+                        48.
+                    }) + status_height;
+                    egui::TopBottomPanel::bottom(egui::Id::new(("memo_footer", i)))
+                        .exact_height(footer_height)
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(if mode == Mode::Sticker {
+                                    paper
+                                } else {
+                                    ctx.style().visuals.panel_fill
+                                })
+                                .corner_radius(egui::CornerRadius {
+                                    nw: 0,
+                                    ne: 0,
+                                    sw: 12,
+                                    se: 12,
+                                })
+                                .inner_margin(egui::Margin::symmetric(12, 6)),
+                        )
+                        .show(ctx, |ui| {
+                            if mode == Mode::Sticker {
+                                paper_style(ui, paper);
+                            }
+                            self.data.notes[i].document.toolbar_visible = engaged;
+                            let rect = ui.max_rect();
+                            crate::composer::footer(
+                                ui,
+                                &mut self.data.notes[i].document,
+                                ("memo_document", i),
+                                if engaged { 32. } else { 0. },
+                            );
+                            if engaged {
+                                let arrow = Rect::from_min_size(
+                                    Pos2::new(rect.right() - 28., rect.bottom() - 28.),
+                                    Vec2::splat(28.),
+                                );
+                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrow), |ui| {
+                                    if icon_button(ui, Icon::ChevronRight, "연결된 메모").clicked()
+                                    {
+                                        w.related = !w.related;
+                                    }
+                                });
+                            }
+                        });
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(if mode == Mode::Sticker {
+                                    paper
+                                } else {
+                                    ctx.style().visuals.panel_fill
+                                })
+                                .inner_margin(egui::Margin::symmetric(12, 4)),
+                        )
+                        .show(ctx, |ui| {
+                            if mode == Mode::Sticker {
+                                paper_style(ui, paper);
+                            }
+                            let n = &mut self.data.notes[i];
+                            crate::composer::content(
+                                ui,
+                                &mut n.body,
+                                &mut n.document,
+                                ("memo_document", i),
+                            );
+                        });
                     self.consume_body_project(i);
-                    if mode==Mode::Sticker && self.data.notes[i].document.active==0 && (!focused||self.data.notes[i].body.contains('\n')){
-                        let n=&mut self.data.notes[i];crate::desktop::infer_title(&mut n.title,&mut n.body);
+                    if mode == Mode::Sticker
+                        && self.data.notes[i].document.active == 0
+                        && (!focused || self.data.notes[i].body.contains('\n'))
+                    {
+                        let n = &mut self.data.notes[i];
+                        crate::desktop::infer_title(&mut n.title, &mut n.body);
                     }
                 }
-                if w.mode!=mode || !w.open {
-                    w.native.cancel();w.help=false;w.related=false;
-                    if w.mode==Mode::Swatch && self.desktop.unpin_minimized{self.data.notes[i].topmost=false;}
-                    if self.extra.picker.as_ref().is_some_and(|p|p.owner==ctx.viewport_id()){self.extra.picker=None;}
-                    if self.extra.scope_owner==ctx.viewport_id(){self.extra.completion_scope=None;}
+                if w.mode != mode || !w.open {
+                    w.native.cancel();
+                    w.help = false;
+                    w.related = false;
+                    if w.mode == Mode::Swatch && self.desktop.unpin_minimized {
+                        self.data.notes[i].topmost = false;
+                    }
+                    if self
+                        .extra
+                        .picker
+                        .as_ref()
+                        .is_some_and(|p| p.owner == ctx.viewport_id())
+                    {
+                        self.extra.picker = None;
+                    }
+                    if self.extra.scope_owner == ctx.viewport_id() {
+                        self.extra.completion_scope = None;
+                    }
                 }
-                if self.active!=i{self.active=i;self.extra.edit_occurrence=w.occurrence;}
-                self.picker_window(ctx);self.scope_dialog(ctx);
+                if self.active != i {
+                    self.active = i;
+                    self.extra.edit_occurrence = w.occurrence;
+                }
+                self.picker_window(ctx);
+                self.scope_dialog(ctx);
                 if w.help {
-                    let mut open=true;
-                    egui::Window::new("메모 도움말").id(egui::Id::new(("memo_help",i))).open(&mut open).default_width(300.).show(ctx,|ui|{
-                        ui.label("윗부분을 끌어 이동하고 모서리로 크기를 조절하세요.");ui.label("접기: 제목 한 줄, 다시 누르면 색상 상자입니다.");ui.label("색상 상자를 두 번 클릭하면 스티커로 돌아옵니다.");ui.label("탭은 본문 아래, 서식 도구는 창 맨 아래에 있습니다.");ui.label("더보기에서 일정 편집과 도움말을 엽니다.");ui.separator();ui.label(format!("새 스티커 · {}",self.shortcut_label(2)));ui.label("창을 닫아도 메모는 목록에 남습니다.");
-                    });w.help=open;
+                    let mut open = true;
+                    egui::Window::new("메모 도움말")
+                        .id(egui::Id::new(("memo_help", i)))
+                        .open(&mut open)
+                        .default_width(300.)
+                        .show(ctx, |ui| {
+                            ui.label("윗부분을 끌어 이동하고 모서리로 크기를 조절하세요.");
+                            ui.label("접기: 제목 한 줄, 다시 누르면 색상 상자입니다.");
+                            ui.label("색상 상자를 두 번 클릭하면 스티커로 돌아옵니다.");
+                            ui.label("탭은 본문 아래, 서식 도구는 창 맨 아래에 있습니다.");
+                            ui.label("더보기에서 일정 편집과 도움말을 엽니다.");
+                            ui.separator();
+                            ui.label(format!("새 스티커 · {}", self.shortcut_label(2)));
+                            ui.label("창을 닫아도 메모는 목록에 남습니다.");
+                        });
+                    w.help = open;
                 }
                 if w.related {
-                    let mut open=true;let related:Vec<_>=self.data.notes.iter().enumerate().filter(|(j,n)|self.visible(*j)&&*j!=i&&(n.parents.contains(&i)||self.data.notes[i].parents.contains(j)||self.data.links.contains(&(i.min(*j),i.max(*j))))).map(|(j,_)|j).collect();
-                    egui::Window::new("연결된 메모").id(egui::Id::new(("memo_related",i))).open(&mut open).default_width(280.).default_pos(Pos2::new((ctx.screen_rect().width()-290.).max(8.),(ctx.screen_rect().height()-260.).max(8.))).show(ctx,|ui|{
-                        if related.is_empty(){ui.label(RichText::new("연결된 메모가 없습니다").color(MUTED));}
-                        egui::ScrollArea::vertical().max_height(200.).show(ui,|ui|{for j in related{if ui.link(&self.data.notes[j].title).clicked(){self.open_sticker(j,self.data.notes[j].date);w.related=false;}}});
-                    });w.related&=open;
+                    let mut open = true;
+                    let related: Vec<_> = self
+                        .data
+                        .notes
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, n)| {
+                            self.visible(*j)
+                                && *j != i
+                                && (n.parents.contains(&i)
+                                    || self.data.notes[i].parents.contains(j)
+                                    || self.data.links.contains(&(i.min(*j), i.max(*j))))
+                        })
+                        .map(|(j, _)| j)
+                        .collect();
+                    egui::Window::new("연결된 메모")
+                        .id(egui::Id::new(("memo_related", i)))
+                        .open(&mut open)
+                        .default_width(280.)
+                        .default_pos(Pos2::new(
+                            (ctx.screen_rect().width() - 290.).max(8.),
+                            (ctx.screen_rect().height() - 260.).max(8.),
+                        ))
+                        .show(ctx, |ui| {
+                            if related.is_empty() {
+                                ui.label(RichText::new("연결된 메모가 없습니다").color(MUTED));
+                            }
+                            egui::ScrollArea::vertical()
+                                .max_height(200.)
+                                .show(ui, |ui| {
+                                    for j in related {
+                                        if ui.link(&self.data.notes[j].title).clicked() {
+                                            self.open_sticker(j, self.data.notes[j].date);
+                                            w.related = false;
+                                        }
+                                    }
+                                });
+                        });
+                    w.related &= open;
                 }
             });
             if self.active == i {
@@ -401,7 +691,7 @@ impl App {
                 if icon_button(ui, Icon::Fold, "메모 접기").clicked() {
                     w.fold();
                 }
-                if ui.small_button("스티커 노트").clicked() {
+                if icon_button(ui, Icon::Sticky, "스티커 노트로 전환").clicked() {
                     w.sticker();
                 }
             }
@@ -426,7 +716,7 @@ impl App {
                 )
                 .sense(Sense::drag()),
             );
-            if response.drag_started() {
+            if response.drag_started() || response.drag_stopped() {
                 w.native.start_drag(ctx);
             }
             if engaged {

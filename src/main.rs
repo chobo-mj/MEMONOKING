@@ -725,6 +725,8 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1440., 900.])
+                .with_maximized(true)
+                .with_clamp_size_to_monitor_size(true)
                 .with_min_inner_size([1100., 720.]),
             ..Default::default()
         },

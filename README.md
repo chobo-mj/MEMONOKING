@@ -4,13 +4,13 @@ Windows Rust + egui/eframe 개인 메모·일정 작업 공간의 **0.2.0 UI Pre
 
 ## 설치파일과 포터블
 
-예정 사전 배포는 [v0.2.0-ui-preview](https://github.com/chobo-mj/MEMONOKING/releases/tag/v0.2.0-ui-preview)입니다. 아래는 **게시 예정 주소**이며 GitHub 빌드·설치/제거 검사와 업로드가 완료된 뒤 다운로드할 수 있습니다.
+예정 사전 배포는 [v0.2.0-ui-preview.1](https://github.com/chobo-mj/MEMONOKING/releases/tag/v0.2.0-ui-preview.1)입니다. 아래는 **게시 예정 주소**이며 GitHub 빌드·설치/제거 검사와 업로드가 완료된 뒤 다운로드할 수 있습니다.
 
 | 파일 | 용도 |
 |---|---|
-| [Windows x64 설치파일](https://github.com/chobo-mj/MEMONOKING/releases/download/v0.2.0-ui-preview/MEMONOKING-0.2.0-ui-preview-Windows-x64-Setup.exe) | 현재 사용자에게 설치, 시작 메뉴 바로가기·선택적 바탕화면 바로가기·제거 지원 |
-| [Windows x64 포터블 ZIP](https://github.com/chobo-mj/MEMONOKING/releases/download/v0.2.0-ui-preview/MEMONOKING-0.2.0-ui-preview-Windows-x64-Portable.zip) | 압축을 푼 뒤 MEMONOKING.exe 실행 |
-| [SHA256SUMS.txt](https://github.com/chobo-mj/MEMONOKING/releases/download/v0.2.0-ui-preview/SHA256SUMS.txt) | 설치파일·ZIP 해시 대조 |
+| [Windows x64 설치파일](https://github.com/chobo-mj/MEMONOKING/releases/download/v0.2.0-ui-preview.1/MEMONOKING-0.2.0-ui-preview.1-Windows-x64-Setup.exe) | 현재 사용자에게 설치, 시작 메뉴 바로가기·선택적 바탕화면 바로가기·제거 지원 |
+| [Windows x64 포터블 ZIP](https://github.com/chobo-mj/MEMONOKING/releases/download/v0.2.0-ui-preview.1/MEMONOKING-0.2.0-ui-preview.1-Windows-x64-Portable.zip) | 압축을 푼 뒤 MEMONOKING.exe 실행 |
+| [SHA256SUMS.txt](https://github.com/chobo-mj/MEMONOKING/releases/download/v0.2.0-ui-preview.1/SHA256SUMS.txt) | 설치파일·ZIP 해시 대조 |
 
 설치 기본 위치는 `%LOCALAPPDATA%\Programs\MEMONOKING`이며 관리자 권한을 요청하지 않습니다. 배포판 실행 PC에는 Rust·C++ 빌드 도구를 설치할 필요가 없습니다. 정적 C 런타임 검사와 사용자 영역 설치·제거 검사를 통과한 파일만 배포하는 구성입니다. 자세한 내용은 [설치·패키징 안내](packaging/README.md)에 있습니다. 원본 PPT나 실제 사용자 파일을 패키지에 넣지 않습니다.
 

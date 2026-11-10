@@ -584,7 +584,7 @@ impl App {
         let height = panel_height(ui);
         let rect =
             egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), height));
-        let preview_width = 300_f32.min(rect.width() * 0.42).max(250.);
+        let preview_width = (rect.width() - TABLE_WIDTH - 16.).clamp(250., 300.);
         let list_width = (rect.width() - preview_width - 16.).max(180.);
         let table_rows: Vec<_> = rows.iter().map(|&(i, d)| TableRow::Note(i, d)).collect();
         ui.allocate_new_ui(
