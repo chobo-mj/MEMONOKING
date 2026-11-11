@@ -1,10 +1,10 @@
 ; Per-user, offline Windows x64 UI preview installer.
 ; Input is a strictly staged directory, never the source tree or user data.
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.0"
 #endif
 #ifndef ReleaseLabel
-  #define ReleaseLabel "0.2.0-ui-preview.2"
+  #define ReleaseLabel "0.3.0-ui-preview.1"
 #endif
 #ifndef StageDir
   #define StageDir "..\dist\portable\OmniMemoJang"
