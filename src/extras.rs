@@ -835,7 +835,7 @@ impl App {
             self.editor = false;
             self.sticky = false;
         }
-        self.toast = "프로젝트 삭제 범위를 반영했습니다 · 종료 시 초기화되는 미리보기입니다".into();
+        self.toast = "프로젝트 삭제 범위를 반영했습니다".into();
     }
     fn search_window(&mut self, ctx: &egui::Context) {
         let mut open = self.extra.search_options;

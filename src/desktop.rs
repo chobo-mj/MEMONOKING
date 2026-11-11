@@ -589,7 +589,7 @@ impl App {
                     });
                     crate::ui::hint(
                         ui,
-                        "화면 잠금 미리보기입니다 · 암호화 저장은 아직 연결 전입니다",
+                        "비밀번호는 해시로만 저장합니다 · 본문은 암호화하지 않습니다",
                     );
                     ui.add_space(10.);
                     let r = ui.add(
@@ -730,7 +730,10 @@ impl App {
                         &mut self.desktop.reminder_hour,
                         &mut self.desktop.reminder_minute,
                     );
-                    crate::ui::hint(ui, "Windows 알림 연결은 후속 단계입니다");
+                    crate::ui::hint(
+                        ui,
+                        "시각이 되면 소리와 함께 화면 오른쪽 아래에 알림 창이 뜹니다",
+                    );
                     ui.add_space(4.);
                     let mut out = (false, false);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1247,11 +1250,14 @@ impl App {
                     &mut self.desktop.image_age,
                     &["용량 기준", "1년 이상", "2년 이상", "3년 이상"],
                 );
-                hint(ui, "백업 후 100 kB 이하 썸네일만 남깁니다.");
+                hint(
+                    ui,
+                    "정리 기준은 저장해 둡니다 · 자동 정리는 다음 버전에서 동작합니다",
+                );
                 ui.add_space(6.);
                 if ui.button("썸네일 처리된 원본 일괄 정리").clicked() {
                     self.desktop.last_action =
-                        "정리 정책을 선택했습니다. 이번 미리보기에서는 파일을 삭제하지 않습니다."
+                        "이미지 자동 정리는 다음 버전에서 동작합니다. 지금은 파일을 지우지 않습니다."
                             .into();
                 }
             }

@@ -240,17 +240,19 @@ jobs:
           @"
           # OmniMemoJang $env:RELEASE_LABEL
 
-          Windows 10/11 x64 화면·조작 시험용 사전 배포입니다.
+          Windows 10/11 x64용 사전 배포입니다.
 
           - Setup.exe: 관리자 권한 없이 현재 사용자에게 설치, 시작 메뉴 바로가기와 제거 지원.
           - Portable.zip: 압축을 푼 뒤 OmniMemoJang.exe 실행. Rust나 빌드 도구 설치 불필요.
           - SHA256SUMS.txt: 설치파일과 ZIP의 SHA-256 대조용.
           - 실행에는 인터넷이나 별도 Visual C++ 런타임 다운로드가 필요하지 않습니다.
 
-          **종료하면 메모와 설정이 초기화됩니다. 실제 업무 자료 저장용이 아닙니다.**
-          잠금은 UI 시뮬레이션이며 암호화 보안을 제공하지 않습니다. 저장·백업·복원·Windows 알림/트레이/자동실행은 후속입니다. 보호된 PDF/PPT/Excel 잠금을 우회하지 않습니다.
+          메모·위키·설정은 자동으로 저장됩니다(%APPDATA%\OmniMemoJang). 프로그램을 제거해도 데이터는 남습니다.
+          처음 실행하면 나만의 위키의 ‘사용법’ 탭이 열립니다. 변경 내용은 저장소의 docs/WORKLOG-*.md에 있습니다.
 
-          이 배포는 서명되지 않았습니다. 사내 실행·반입 정책을 따라 시험하세요.
+          잠금 메모의 비밀번호는 해시로만 저장하지만 본문은 암호화하지 않습니다. 근무자 보기(엑셀 연동), Windows 알림 센터·트레이 아이콘, 이미지 자동 정리는 후속입니다. 보호된 PDF/PPT/Excel 잠금을 우회하지 않습니다.
+
+          이 배포는 서명되지 않았습니다. 사내 실행·반입 정책에 따라 사용하세요.
           빌드 원본: $env:SOURCE_COMMIT
           "@ | Set-Content -LiteralPath 'dist/RELEASE_NOTES.md' -Encoding utf8
 
