@@ -31,6 +31,8 @@ pub struct Window {
     place: Option<Pos2>,
     swatch_drag: Option<(Vec2, Pos2, Vec2)>,
     menu: Option<Menu>,
+    /// Where the window was last seen on screen, for reopening it there.
+    last_pos: Option<Pos2>,
 }
 /// Desktop arrangement requested from a sticker's context menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,7 +68,58 @@ impl Window {
             place: None,
             swatch_drag: None,
             menu: None,
+            last_pos: None,
         }
+    }
+    /// What is needed to reopen this window after a restart.
+    pub fn session(&self, note: usize) -> crate::storage::SessionRec {
+        crate::storage::SessionRec {
+            note,
+            mode: match self.mode {
+                Mode::Editor => 0,
+                Mode::Title => 1,
+                Mode::Swatch => 2,
+                Mode::Sticker => 3,
+            },
+            sticker_preferred: self.sticker_preferred,
+            pos: self.last_pos.map(|p| [p.x, p.y]),
+            full_size: self.full_size.into(),
+            sticker_size: self.sticker_size.into(),
+            title_width: self.title_width,
+            swatch_size: self.swatch_size.into(),
+        }
+    }
+    /// A window reopened where it was, without taking focus.
+    pub fn from_session(r: &crate::storage::SessionRec) -> Self {
+        let mode = match r.mode {
+            1 => Mode::Title,
+            2 => Mode::Swatch,
+            3 => Mode::Sticker,
+            _ => Mode::Editor,
+        };
+        let mut w = Self::new(mode);
+        w.sticker_preferred = r.sticker_preferred;
+        let size =
+            |s: [f32; 2], min: Vec2| (s[0] > 0. && s[1] > 0.).then(|| Vec2::from(s).max(min));
+        if let Some(s) = size(r.full_size, Vec2::new(480., 480.)) {
+            w.full_size = s;
+        }
+        if let Some(s) = size(r.sticker_size, Vec2::new(340., 220.)) {
+            w.sticker_size = s;
+        }
+        if r.title_width > 0. {
+            w.title_width = r.title_width.max(160.);
+        }
+        if let Some(s) = size(r.swatch_size, Vec2::splat(16.)) {
+            w.swatch_size = s;
+        }
+        w.focus = false;
+        if let Some(p) = r.pos {
+            w.center = false;
+            w.place = Some(Pos2::new(p[0], p[1]));
+            w.last_pos = w.place;
+        }
+        w
     }
     fn reconcile(&mut self, n: &Note) {
         if let (Some(old), Some(new), Some(d)) = (self.schedule_start, n.date, self.occurrence) {
@@ -528,6 +581,7 @@ impl App {
         if plain(&ui.button("동일 프로젝트 보기")) {
             self.project_filter = Some(self.data.notes[i].project.unwrap_or(NO_PROJECT));
             self.page = 0;
+            self.main_open = true;
             ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Focus);
             done = true;
@@ -1019,6 +1073,9 @@ impl App {
                 if ctx.input(|v| v.viewport().close_requested()) {
                     w.open = false;
                 }
+                if let Some(p) = ctx.input(|v| v.viewport().outer_rect.map(|r| r.min)) {
+                    w.last_pos = Some(p);
+                }
                 self.memo_shortcuts(ctx, i, &mut w);
                 // The color box is resized by its own handle: Windows enforces a
                 // minimum tracking width on natively resizable windows, which
@@ -1418,12 +1475,14 @@ impl App {
             self.catalog.focus_find();
             self.catalog.tab = 1;
             self.page = 4;
+            self.main_open = true;
             ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Focus);
         }
         if ctx.input_mut(|v| v.consume_key(egui::Modifiers::CTRL, egui::Key::H)) {
             self.catalog.replace_open = true;
             self.catalog.selected = Some(i);
             self.page = 4;
+            self.main_open = true;
             ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Focus);
         }
         if ctx.input_mut(|v| v.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {

@@ -9,6 +9,7 @@ mod dragging;
 mod extras;
 mod guide;
 mod icons;
+mod lists;
 mod media;
 mod model;
 mod native_window;
@@ -19,6 +20,7 @@ mod schedule;
 mod storage;
 mod studio;
 mod system;
+mod tray;
 mod ui;
 mod views;
 mod win_style;
@@ -71,6 +73,12 @@ struct App {
     alarms: alarm::Alarms,
     /// Autostart value last written to Windows (`None` before the first check).
     autostart_applied: Option<bool>,
+    /// The tray icon; while it is there, closing the main window hides it.
+    tray: tray::Tray,
+    /// The main window is shown (hidden in the tray otherwise).
+    main_open: bool,
+    /// Filtered and sorted memo lists, reused until something changes.
+    lists: lists::Cache,
     settings: bool,
     month: NaiveDate,
     day: NaiveDate,
@@ -136,11 +144,15 @@ impl App {
             }
         }
         cc.egui_ctx.set_fonts(fonts);
+        storage::watch_input(&cc.egui_ctx);
         let mut a = Self::sample(Local::now().date_naive());
         a.prefs = prefs::Prefs::load();
         a.cal.theme = a.prefs.cal_theme;
         a.load_or_start();
         a.prefs_saved = a.prefs.to_text();
+        a.tray = tray::Tray::new();
+        // Started with Windows: stay in the tray, stickers on the desktop.
+        a.main_open = !(a.tray.active() && std::env::args().any(|x| x == "--tray"));
         a.hotkeys = GlobalHotKeyManager::new().ok();
         a.apply_shortcuts();
         a
@@ -169,6 +181,9 @@ impl App {
             saving: storage::Saving::default(),
             alarms: alarm::Alarms::default(),
             autostart_applied: None,
+            tray: tray::Tray::default(),
+            main_open: true,
+            lists: lists::Cache::default(),
             settings: false,
             month: today.with_day(1).unwrap(),
             day: today,
@@ -365,6 +380,25 @@ impl eframe::App for App {
                 }
             }
         }
+        for action in self.tray.poll() {
+            match action {
+                tray::Action::Open => {
+                    self.main_open = true;
+                    ctx.send_viewport_cmd_to(
+                        main_viewport(),
+                        egui::ViewportCommand::Minimized(false),
+                    );
+                    ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Focus);
+                }
+                tray::Action::NewSticker => {
+                    self.new_sticker();
+                }
+                tray::Action::Quit => {
+                    self.autosave(0., true);
+                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                }
+            }
+        }
         self.keep_prefs();
         // The host itself paints nothing.
         egui::CentralPanel::default()
@@ -387,6 +421,9 @@ impl eframe::App for App {
 }
 impl App {
     fn main_window(&mut self, root: &egui::Context) {
+        if !self.main_open {
+            return;
+        }
         let builder = egui::ViewportBuilder::default()
             .with_title("OmniMemoJang")
             .with_inner_size([1440., 900.])
@@ -396,7 +433,13 @@ impl App {
             self.theme(ctx);
             self.drag_input(ctx);
             if ctx.input(|i| i.viewport().close_requested()) {
-                root.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                if self.tray.active() {
+                    // Down to the tray; the program and its stickers keep running.
+                    self.main_open = false;
+                    self.autosave(0., true);
+                } else {
+                    root.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                }
             }
             self.main_shortcuts(ctx);
             self.main_ui(ctx);
@@ -592,13 +635,17 @@ impl App {
         }
         ui.add_space(6.);
         let today = Local::now().date_naive();
-        let today_count = self
-            .data
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| self.visible(*i) && n.occurs(today) && !n.done_on(Some(today)))
-            .count();
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = lists::key((today, self.data.notes.len()));
+        let today_count = *cache.get("today_count", key, || {
+            self.data
+                .notes
+                .iter()
+                .enumerate()
+                .filter(|(i, n)| self.visible(*i) && n.occurs(today) && !n.done_on(Some(today)))
+                .count()
+        });
+        self.lists = cache;
         for (page, name, icon) in PAGES {
             if self.prefs.hidden_pages.contains(&page) {
                 continue;
@@ -771,8 +818,7 @@ impl App {
         if text != self.prefs_saved {
             // A new data folder gets a full save right away.
             if prefs::Prefs::from_text(&self.prefs_saved).data_path != self.prefs.data_path {
-                self.saving.last = None;
-                self.saving.checked = f64::MIN;
+                self.saving.rewrite();
             }
             self.prefs.save();
             self.prefs_saved = text;
@@ -801,6 +847,10 @@ fn shorten(s: &str, n: usize) -> String {
     }
 }
 fn main() -> eframe::Result {
+    // A second launch only brings the running copy's main window back.
+    if !tray::single_instance() {
+        return Ok(());
+    }
     // The root window is an invisible, never-minimized host. Every visible
     // window (main, calendar, stickers, dialogs) is an independent child, so
     // minimizing the main window leaves stickers alive on the desktop and the

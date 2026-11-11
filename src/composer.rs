@@ -93,6 +93,10 @@ pub struct Picture {
     pub height: usize,
     pub scale: f32,
     pub fit: bool,
+    /// File name in the data folder's `images` folder once saved. A saved
+    /// picture keeps no pixels in memory: they are read from the file only
+    /// while it is shown, copied or exported.
+    pub file: String,
     texture: Option<egui::TextureHandle>,
 }
 impl Picture {
@@ -113,8 +117,38 @@ impl Picture {
             height: size[1],
             scale,
             fit,
+            file: String::new(),
             texture: None,
         }
+    }
+    /// A saved picture whose pixels stay in its file until shown.
+    pub fn saved(
+        id: u32,
+        name: String,
+        file: String,
+        size: [usize; 2],
+        scale: f32,
+        fit: bool,
+    ) -> Self {
+        let mut p = Self::from_rgba(id, name, vec![], size, scale, fit);
+        p.file = file;
+        p
+    }
+    /// The RGBA pixels, read from the saved file when not in memory. Empty
+    /// when neither is available.
+    pub fn rgba(&self) -> std::borrow::Cow<'_, [u8]> {
+        if self.width > 0 && self.pixels.len() == self.width * self.height * 4 {
+            std::borrow::Cow::Borrowed(&self.pixels)
+        } else {
+            crate::storage::load_picture(&self.file, [self.width, self.height])
+                .map(std::borrow::Cow::Owned)
+                .unwrap_or(std::borrow::Cow::Borrowed(&[]))
+        }
+    }
+    fn color_image(&self) -> Option<egui::ColorImage> {
+        let px = self.rgba();
+        (self.width > 0 && px.len() == self.width * self.height * 4)
+            .then(|| egui::ColorImage::from_rgba_unmultiplied([self.width, self.height], &px))
     }
 }
 #[derive(Clone)]
@@ -885,49 +919,46 @@ pub fn view(ui: &mut egui::Ui, legacy: &str, doc: &Document, id: impl Hash) {
                     });
             }
             Block::Picture(picture) => {
-                if picture.width == 0
-                    || picture.height == 0
-                    || picture.pixels.len()
-                        != picture
-                            .width
-                            .saturating_mul(picture.height)
-                            .saturating_mul(4)
-                {
+                if picture.width == 0 || picture.height == 0 {
                     continue;
                 }
-                let texture_id =
-                    id.with(("view_picture", active, bi, picture.width, picture.height));
-                let texture = picture
-                    .texture
-                    .clone()
-                    .or_else(|| {
-                        ui.ctx()
-                            .data(|d| d.get_temp::<egui::TextureHandle>(texture_id))
-                    })
-                    .unwrap_or_else(|| {
-                        let texture = ui.ctx().load_texture(
-                            texture_id.short_debug_format(),
-                            egui::ColorImage::from_rgba_unmultiplied(
-                                [picture.width, picture.height],
-                                &picture.pixels,
-                            ),
-                            egui::TextureOptions::LINEAR,
-                        );
-                        ui.ctx()
-                            .data_mut(|d| d.insert_temp(texture_id, texture.clone()));
-                        texture
-                    });
                 let available = ui.available_width().max(16.);
                 let width = if picture.fit {
                     available
                 } else {
                     (picture.width as f32 * picture.scale).min(available)
                 };
-                ui.image((
-                    texture.id(),
-                    Vec2::new(width, width * picture.height as f32 / picture.width as f32),
-                ))
-                .on_hover_text(&picture.name);
+                let size = Vec2::new(width, width * picture.height as f32 / picture.width as f32);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+                // Pictures are read from disk only once they scroll into view.
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let texture_id =
+                    id.with(("view_picture", active, bi, picture.width, picture.height));
+                let texture = picture.texture.clone().or_else(|| {
+                    ui.ctx()
+                        .data(|d| d.get_temp::<egui::TextureHandle>(texture_id))
+                        .or_else(|| {
+                            let texture = ui.ctx().load_texture(
+                                texture_id.short_debug_format(),
+                                picture.color_image()?,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(texture_id, texture.clone()));
+                            Some(texture)
+                        })
+                });
+                if let Some(texture) = texture {
+                    ui.painter().image(
+                        texture.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
+                        Color32::WHITE,
+                    );
+                }
+                response.on_hover_text(&picture.name);
             }
         }
     }
@@ -1692,15 +1723,18 @@ fn paint_pictures(
         else {
             continue;
         };
-        if p.texture.is_none() && p.pixels.len() == p.width * p.height * 4 {
-            p.texture = Some(
-                ui.ctx().load_texture(
-                    id.with(("inline_picture", doc.active, pid))
-                        .short_debug_format(),
-                    egui::ColorImage::from_rgba_unmultiplied([p.width, p.height], &p.pixels),
-                    egui::TextureOptions::LINEAR,
-                ),
-            );
+        // Pictures are read from disk only once they scroll into view.
+        if p.texture.is_none() && ui.is_rect_visible(rect) {
+            if let Some(image) = p.color_image() {
+                p.texture = Some(
+                    ui.ctx().load_texture(
+                        id.with(("inline_picture", doc.active, pid))
+                            .short_debug_format(),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ),
+                );
+            }
         }
         if let Some(t) = &p.texture {
             painter.image(
@@ -1767,7 +1801,7 @@ fn paint_pictures(
                                     let _ = c.set_image(arboard::ImageData {
                                         width: p.width,
                                         height: p.height,
-                                        bytes: std::borrow::Cow::Borrowed(&p.pixels),
+                                        bytes: p.rgba(),
                                     });
                                 }
                                 close = true;
@@ -1946,6 +1980,7 @@ fn picture_from_file(path: &Path, scale: f32, fit: bool) -> Result<Picture, Stri
         pixels: img.into_raw(),
         scale,
         fit,
+        file: String::new(),
         texture: None,
         id: 0,
     })
@@ -1965,6 +2000,7 @@ fn picture_from_clipboard(scale: f32, fit: bool) -> Result<Picture, String> {
         pixels: image.bytes.into_owned(),
         scale,
         fit,
+        file: String::new(),
         texture: None,
         id: 0,
     })
@@ -2748,6 +2784,7 @@ mod inline_picture_tests {
             height: h,
             scale: 1.,
             fit: false,
+            file: String::new(),
             texture: None,
         }
     }

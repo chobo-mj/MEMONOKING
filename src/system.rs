@@ -20,7 +20,8 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
             }
             let result = if on {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let value = wide(&format!("\"{}\"", exe.display()));
+                // Started by Windows: straight to the tray, stickers on the desktop.
+                let value = wide(&format!("\"{}\" --tray", exe.display()));
                 RegSetValueExW(
                     h,
                     name.as_ptr(),

@@ -335,14 +335,9 @@ impl App {
         self.catalog_preview(&mut preview, height);
         ui.allocate_rect(rect, Sense::hover());
     }
-    pub fn agenda(&mut self, ui: &mut egui::Ui, mode: usize) {
-        if !self.split && mode == 0 {
-            self.detail_workspace(ui, mode);
-            return;
-        }
-        let today = Local::now().date_naive();
-        self.filters(ui);
-        ui.add_space(14.);
+    /// Memo rows of the agenda (each day of a multi-day memo is a row),
+    /// filtered and sorted.
+    fn agenda_rows(&self, mode: usize, today: NaiveDate) -> Vec<(usize, Option<NaiveDate>)> {
         let mut rows = vec![];
         for (i, n) in self.data.notes.iter().enumerate() {
             if !self.matches_search(i)
@@ -380,6 +375,21 @@ impl App {
                 (d.unwrap_or(NaiveDate::MAX), n.time, i, d)
             }
         });
+        rows
+    }
+    pub fn agenda(&mut self, ui: &mut egui::Ui, mode: usize) {
+        if !self.split && mode == 0 {
+            self.detail_workspace(ui, mode);
+            return;
+        }
+        let today = Local::now().date_naive();
+        self.filters(ui);
+        ui.add_space(14.);
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key((mode, today, self.data.notes.len()));
+        let rows = cache.get("agenda", key, || self.agenda_rows(mode, today));
+        self.lists = cache;
+        let rows = (*rows).clone();
         if mode == 2 || mode == 3 {
             let mut seen = std::collections::HashSet::new();
             let important: Vec<_> = rows
@@ -391,7 +401,9 @@ impl App {
                 group_header(ui, "중요", important.len());
                 ui.push_id("important", |ui| {
                     for (i, d) in important {
-                        self.task_row_on(ui, i, d);
+                        crate::lists::lazy_row(ui, (i, d), 48., false, |ui| {
+                            self.task_row_on(ui, i, d)
+                        });
                     }
                 });
                 ui.add_space(18.);
@@ -435,7 +447,9 @@ impl App {
                 .unwrap_or("일정 없는 메모".into());
             group_header(ui, &label, items.len());
             for (i, occurrence) in items {
-                self.task_row_on(ui, i, occurrence);
+                crate::lists::lazy_row(ui, (i, occurrence), 48., false, |ui| {
+                    self.task_row_on(ui, i, occurrence)
+                });
             }
             ui.add_space(18.);
         }
@@ -657,16 +671,21 @@ impl App {
         });
         ui.add_space(4.);
         ui::divider(ui);
-        let ids: Vec<_> = self
-            .data
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| {
-                self.visible(*i) && !self.is_guide(*i) && self.calendar_matches(n, self.day)
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key((self.day, self.data.notes.len()));
+        let ids = cache.get("calendar_day", key, || {
+            self.data
+                .notes
+                .iter()
+                .enumerate()
+                .filter(|(i, n)| {
+                    self.visible(*i) && !self.is_guide(*i) && self.calendar_matches(n, self.day)
+                })
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        });
+        self.lists = cache;
+        let ids = (*ids).clone();
         if ids.is_empty() {
             ui.add_space(10.);
             ui::hint(ui, "이 날짜에 표시할 메모가 없습니다");
@@ -694,27 +713,48 @@ impl App {
         let band = (self.prefs.cal_font + 8.5).round();
         let step = band + 2.;
         let capacity = (((height - 36.) / step).floor() as usize).max(1);
-        for row in 0..rows {
+        // Bands and lanes of every week row, reused until something changes.
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key((
+            first,
+            rows,
+            month,
+            whole_weeks,
+            hide_done,
+            self.data.notes.len(),
+        ));
+        let weeks = cache.get("calendar_bands", key, || {
+            (0..rows)
+                .map(|row| {
+                    let start = first + Duration::days((row * 7) as i64);
+                    let days: Vec<NaiveDate> = (0..7).map(|c| start + Duration::days(c)).collect();
+                    let shown_day = |c: usize| whole_weeks || days[c].month() == month;
+                    let mut segments = band_segments(
+                        &self.data.notes,
+                        |i| self.visible(i) && !self.is_guide(i),
+                        |n, d| self.calendar_matches(n, d) && !(hide_done && n.done_on(Some(d))),
+                        &days,
+                        shown_day,
+                    );
+                    segments.sort_by_key(|s| {
+                        (
+                            s.first,
+                            std::cmp::Reverse(s.last - s.first),
+                            self.data.notes[s.note].time,
+                        )
+                    });
+                    let lanes = assign_lanes(&segments);
+                    (segments, lanes)
+                })
+                .collect::<Vec<_>>()
+        });
+        self.lists = cache;
+        for (row, (segments, lanes)) in weeks.iter().enumerate() {
             let start = first + Duration::days((row * 7) as i64);
             let days: Vec<NaiveDate> = (0..7).map(|c| start + Duration::days(c)).collect();
             let shown_day = |c: usize| whole_weeks || days[c].month() == month;
-            let mut segments = band_segments(
-                &self.data.notes,
-                |i| self.visible(i) && !self.is_guide(i),
-                |n, d| self.calendar_matches(n, d) && !(hide_done && n.done_on(Some(d))),
-                &days,
-                shown_day,
-            );
-            segments.sort_by_key(|s| {
-                (
-                    s.first,
-                    std::cmp::Reverse(s.last - s.first),
-                    self.data.notes[s.note].time,
-                )
-            });
-            let lanes = assign_lanes(&segments);
             let mut covering = [0usize; 7];
-            for s in &segments {
+            for s in segments {
                 for c in &mut covering[s.first..=s.last] {
                     *c += 1;
                 }
@@ -724,7 +764,7 @@ impl App {
                 .map(|&n| if n > capacity { capacity - 1 } else { capacity })
                 .collect();
             let row_top = all.top() + row as f32 * height;
-            for (s, &lane) in segments.iter().zip(&lanes) {
+            for (s, &lane) in segments.iter().zip(lanes) {
                 // Draw the parts of the band whose days have room for its lane.
                 let mut c = s.first;
                 while c <= s.last {

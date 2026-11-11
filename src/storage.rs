@@ -1,20 +1,29 @@
 //! Saving and loading everything the user makes: memos, projects, links,
 //! the wiki tree, folders, trash and settings.
 //!
-//! Data lives in one `data.json` in the data folder (by default
-//! `%APPDATA%\OmniMemoJang\data`); pictures in memos are stored next to it as
-//! PNG files named by their content (`images\<hash>.png`), so unchanged
-//! pictures are written once. The UI never touches the disk: `App::autosave`
-//! compares a fresh snapshot with the last one written, at most every two
-//! seconds, and on exit.
+//! Data lives in `data.db` (SQLite) in the data folder (by default
+//! `%APPDATA%\OmniMemoJang\data`): one row per memo plus one row for the
+//! rest (projects, wiki tree, settings, open memo windows). Pictures are PNG
+//! files named by their content (`images\<hash>.png`), written once and never
+//! deleted; a saved picture is read back only while it is on screen, and lists
+//! use small cached thumbnails (`images\thumbs`).
+//!
+//! `App::autosave` runs after user input (at most every two seconds), once a
+//! minute as a safety net, and on exit; it writes only the memos that changed.
+//! An older `data.json` is moved into the database on first start.
 use crate::composer::{Block, Cell, Document, Format, Picture, Span, Tab, Table};
 use crate::*;
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
+/// The database file.
+pub const DB: &str = "data.db";
+/// The single-file format used before 0.4 (and still readable).
 pub const FILE: &str = "data.json";
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -35,6 +44,23 @@ pub struct Saved {
     /// Salted SHA-256 of memo passwords: "salt$hex".
     pub password_hashes: Vec<(usize, String)>,
     pub settings: SettingsRec,
+    /// Memo windows open at the last save, reopened at start-up.
+    pub session: Vec<SessionRec>,
+}
+
+/// An open memo window (sticker, title bar, color box or editor).
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+#[serde(default)]
+pub struct SessionRec {
+    pub note: usize,
+    /// 0 editor, 1 title bar, 2 color box, 3 sticker.
+    pub mode: u8,
+    pub sticker_preferred: bool,
+    pub pos: Option<[f32; 2]>,
+    pub full_size: [f32; 2],
+    pub sticker_size: [f32; 2],
+    pub title_width: f32,
+    pub swatch_size: [f32; 2],
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -167,8 +193,6 @@ pub struct SettingsRec {
     pub sound: bool,
     pub popup: bool,
     pub mute: bool,
-    pub image_limit: f32,
-    pub image_age: usize,
     pub calendar_basis: usize,
     pub always_sticker: bool,
     pub sticker_size: [f32; 2],
@@ -207,8 +231,6 @@ impl Default for SettingsRec {
             sound: true,
             popup: true,
             mute: false,
-            image_limit: 0.,
-            image_age: 0,
             calendar_basis: 1,
             always_sticker: true,
             sticker_size: [360., 360.],
@@ -247,8 +269,6 @@ impl SettingsRec {
         self.sound = d.sound;
         self.popup = d.popup;
         self.mute = d.mute;
-        self.image_limit = d.image_limit;
-        self.image_age = d.image_age;
         self.calendar_basis = d.calendar_basis;
         self.always_sticker = d.always_sticker;
         self.sticker_size = [d.sticker_size.x, d.sticker_size.y];
@@ -278,8 +298,6 @@ impl SettingsRec {
         d.sound = self.sound;
         d.popup = self.popup;
         d.mute = self.mute;
-        d.image_limit = self.image_limit;
-        d.image_age = self.image_age;
         d.calendar_basis = self.calendar_basis.min(2);
         d.always_sticker = self.always_sticker;
         d.sticker_size = Vec2::new(
@@ -353,38 +371,130 @@ pub fn data_dir(custom: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("omnimemojang-data"))
 }
 
-/// Writes pictures as PNG files named by content, once each.
-#[derive(Default)]
-pub struct Pictures {
-    /// Content hash of the pixels → file name already on disk.
-    known: HashMap<u64, String>,
-}
+/// Folders searched for picture files, current data folder first (an older
+/// one stays while its pictures are copied after the data folder changed).
+static IMAGE_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Picture files that could not be read, so they are not retried every frame.
+static MISSING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-impl Pictures {
-    fn file_for(&mut self, dir: &Path, p: &Picture) -> String {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        p.pixels.hash(&mut h);
-        (p.width, p.height).hash(&mut h);
-        let key = h.finish();
-        if let Some(name) = self.known.get(&key) {
-            return name.clone();
-        }
-        let name = format!("{key:016x}.png");
-        let path = dir.join("images").join(&name);
-        if !path.exists() {
-            let _ = std::fs::create_dir_all(dir.join("images"));
-            if let Some(img) =
-                image::RgbaImage::from_raw(p.width as u32, p.height as u32, p.pixels.clone())
-            {
-                let _ = img.save(&path);
-            }
-        }
-        self.known.insert(key, name.clone());
-        name
+/// Make `dir`'s images folder the first place pictures are read from.
+pub fn use_image_dir(dir: &Path) {
+    let images = dir.join("images");
+    let mut dirs = IMAGE_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+    dirs.retain(|d| *d != images);
+    dirs.insert(0, images);
+    if let Ok(mut m) = MISSING.lock() {
+        *m = None;
     }
 }
 
-fn tab_rec(dir: &Path, pics: &mut Pictures, t: &Tab) -> TabRec {
+fn find_image(file: &str) -> Option<PathBuf> {
+    if file.is_empty() || file.contains(['/', '\\']) {
+        return None;
+    }
+    let dirs = IMAGE_DIRS.lock().unwrap_or_else(|e| e.into_inner());
+    dirs.iter().map(|d| d.join(file)).find(|p| p.exists())
+}
+
+/// RGBA pixels of a saved picture, at its recorded size.
+pub fn load_picture(file: &str, size: [usize; 2]) -> Option<Vec<u8>> {
+    if file.is_empty() {
+        return None;
+    }
+    let mut missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
+    if missing.as_ref().is_some_and(|m| m.contains(file)) {
+        return None;
+    }
+    let img = find_image(file)
+        .and_then(|p| image::open(p).ok())
+        .map(|i| i.to_rgba8());
+    let Some(mut img) = img else {
+        missing
+            .get_or_insert_with(Default::default)
+            .insert(file.into());
+        return None;
+    };
+    let (w, h) = (size[0] as u32, size[1] as u32);
+    if (img.width(), img.height()) != (w, h) && w > 0 && h > 0 {
+        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+    }
+    Some(img.into_raw())
+}
+
+/// Longest side of list thumbnails, in pixels.
+const THUMB: u32 = 320;
+
+/// A small version of a picture for lists and galleries. Saved pictures keep
+/// their thumbnail in `images\thumbs`, so the full picture is decoded once.
+pub fn thumbnail(p: &Picture) -> Option<egui::ColorImage> {
+    let cached = find_image(&p.file).and_then(|f| {
+        let thumbs = f.parent()?.join("thumbs");
+        Some((thumbs.join(&p.file), thumbs))
+    });
+    if let Some((path, _)) = &cached {
+        if let Ok(img) = image::open(path) {
+            let img = img.to_rgba8();
+            let size = [img.width() as usize, img.height() as usize];
+            return Some(egui::ColorImage::from_rgba_unmultiplied(size, &img));
+        }
+    }
+    let px = p.rgba();
+    let img = image::RgbaImage::from_raw(p.width as u32, p.height as u32, px.into_owned())?;
+    let img = fit_thumb(img);
+    if let Some((path, thumbs)) = cached {
+        let _ = std::fs::create_dir_all(thumbs);
+        let _ = img.save(path);
+    }
+    let size = [img.width() as usize, img.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(size, &img))
+}
+
+/// Scale down keeping the aspect ratio so the longest side is `THUMB`.
+fn fit_thumb(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    let long = w.max(h);
+    if long <= THUMB {
+        return img;
+    }
+    let (nw, nh) = (
+        (w as u64 * THUMB as u64 / long as u64).max(1) as u32,
+        (h as u64 * THUMB as u64 / long as u64).max(1) as u32,
+    );
+    image::imageops::thumbnail(&img, nw, nh)
+}
+
+/// Write a new picture as a PNG named by its content and remember the name;
+/// its pixels are then dropped from memory.
+fn save_picture(dir: &Path, p: &mut Picture) {
+    if !p.file.is_empty() || p.width == 0 || p.pixels.len() != p.width * p.height * 4 {
+        return;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.pixels.hash(&mut h);
+    (p.width, p.height).hash(&mut h);
+    let name = format!("{:016x}.png", h.finish());
+    let path = dir.join("images").join(&name);
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(dir.join("images"));
+        let Some(img) = image::RgbaImage::from_raw(
+            p.width as u32,
+            p.height as u32,
+            std::mem::take(&mut p.pixels),
+        ) else {
+            return;
+        };
+        // Written under a temporary name so a crash never leaves half a file.
+        let tmp = dir.join("images").join(format!("{name}.tmp.png"));
+        if img.save(&tmp).is_err() || std::fs::rename(&tmp, &path).is_err() {
+            p.pixels = img.into_raw();
+            return;
+        }
+    }
+    p.pixels = Vec::new();
+    p.file = name;
+}
+
+fn tab_rec(t: &Tab) -> TabRec {
     TabRec {
         title: t.title.clone(),
         body: t.body.clone(),
@@ -414,7 +524,7 @@ fn tab_rec(dir: &Path, pics: &mut Pictures, t: &Tab) -> TabRec {
                 Block::Picture(p) => BlockRec::Picture {
                     id: p.id,
                     name: p.name.clone(),
-                    file: pics.file_for(dir, p),
+                    file: p.file.clone(),
                     width: p.width,
                     height: p.height,
                     scale: p.scale,
@@ -425,7 +535,7 @@ fn tab_rec(dir: &Path, pics: &mut Pictures, t: &Tab) -> TabRec {
     }
 }
 
-fn tab_from(dir: &Path, r: &TabRec) -> Tab {
+fn tab_from(r: &TabRec) -> Tab {
     Tab {
         title: r.title.clone(),
         body: r.body.clone(),
@@ -441,12 +551,12 @@ fn tab_from(dir: &Path, r: &TabRec) -> Tab {
         blocks: r
             .blocks
             .iter()
-            .filter_map(|b| match b {
+            .map(|b| match b {
                 BlockRec::Table {
                     cells,
                     width,
                     row_height,
-                } => Some(Block::Table(Table {
+                } => Block::Table(Table {
                     cells: cells
                         .iter()
                         .map(|row| {
@@ -460,7 +570,7 @@ fn tab_from(dir: &Path, r: &TabRec) -> Tab {
                         .collect(),
                     width: *width,
                     row_height: *row_height,
-                })),
+                }),
                 BlockRec::Picture {
                     id,
                     name,
@@ -469,30 +579,24 @@ fn tab_from(dir: &Path, r: &TabRec) -> Tab {
                     height,
                     scale,
                     fit,
-                } => {
-                    let img = image::open(dir.join("images").join(file)).ok()?.to_rgba8();
-                    // The file wins over the recorded size if they disagree.
-                    let size = [img.width() as usize, img.height() as usize];
-                    let _ = (width, height);
-                    Some(Block::Picture(Picture::from_rgba(
-                        *id,
-                        name.clone(),
-                        img.into_raw(),
-                        size,
-                        *scale,
-                        *fit,
-                    )))
-                }
+                } => Block::Picture(Picture::saved(
+                    *id,
+                    name.clone(),
+                    file.clone(),
+                    [*width, *height],
+                    *scale,
+                    *fit,
+                )),
             })
             .collect(),
     }
 }
 
-fn doc_rec(dir: &Path, pics: &mut Pictures, d: &Document) -> DocRec {
+fn doc_rec(d: &Document) -> DocRec {
     DocRec {
-        tabs: d.tabs.iter().map(|t| tab_rec(dir, pics, t)).collect(),
+        tabs: d.tabs.iter().map(tab_rec).collect(),
         active: d.active,
-        trash: d.trash.iter().map(|t| tab_rec(dir, pics, t)).collect(),
+        trash: d.trash.iter().map(tab_rec).collect(),
         font_size: d.font_size,
         font_name: d.font_name.clone(),
         opacity: d.opacity,
@@ -503,13 +607,13 @@ fn doc_rec(dir: &Path, pics: &mut Pictures, d: &Document) -> DocRec {
     }
 }
 
-fn doc_from(dir: &Path, r: &DocRec) -> Document {
+fn doc_from(r: &DocRec) -> Document {
     let mut d = Document::default();
     if !r.tabs.is_empty() {
-        d.tabs = r.tabs.iter().map(|t| tab_from(dir, t)).collect();
+        d.tabs = r.tabs.iter().map(tab_from).collect();
     }
     d.active = r.active.min(d.tabs.len() - 1);
-    d.trash = r.trash.iter().map(|t| tab_from(dir, t)).collect();
+    d.trash = r.trash.iter().map(tab_from).collect();
     if r.font_size > 0. {
         d.font_size = r.font_size;
     }
@@ -532,11 +636,11 @@ fn doc_from(dir: &Path, r: &DocRec) -> Document {
     d
 }
 
-fn note_rec(dir: &Path, pics: &mut Pictures, n: &Note) -> NoteRec {
+fn note_rec(n: &Note) -> NoteRec {
     NoteRec {
         title: n.title.clone(),
         body: n.body.clone(),
-        document: doc_rec(dir, pics, &n.document),
+        document: doc_rec(&n.document),
         reminder: n.reminder,
         locked: n.locked,
         purged: n.purged,
@@ -570,10 +674,10 @@ fn note_rec(dir: &Path, pics: &mut Pictures, n: &Note) -> NoteRec {
     }
 }
 
-fn note_from(dir: &Path, r: &NoteRec, i: usize) -> Note {
+fn note_from(r: &NoteRec, i: usize) -> Note {
     let mut n = Note::new(&r.title, r.date, i);
     n.body = r.body.clone();
-    n.document = doc_from(dir, &r.document);
+    n.document = doc_from(&r.document);
     n.reminder = r.reminder;
     n.locked = r.locked;
     n.purged = r.purged;
@@ -613,10 +717,31 @@ fn note_from(dir: &Path, r: &NoteRec, i: usize) -> Note {
 }
 
 impl App {
-    /// Everything worth keeping, ready to write. Pictures are written to the
-    /// images folder as a side effect (once per picture).
+    /// Everything worth keeping, ready to write. New pictures are written to
+    /// the images folder as a side effect (once per picture).
+    #[cfg(test)]
     pub fn snapshot(&mut self, dir: &Path) -> Saved {
-        let pics = &mut self.saving.pictures;
+        let mut saved = self.meta(dir);
+        saved.notes = self.data.notes.iter().map(note_rec).collect();
+        saved
+    }
+    /// Everything except the memos themselves. New pictures in any memo are
+    /// written to the images folder first, so memos can name their files.
+    fn meta(&mut self, dir: &Path) -> Saved {
+        for n in &mut self.data.notes {
+            for tab in n
+                .document
+                .tabs
+                .iter_mut()
+                .chain(n.document.trash.iter_mut())
+            {
+                for b in &mut tab.blocks {
+                    if let Block::Picture(p) = b {
+                        save_picture(dir, p);
+                    }
+                }
+            }
+        }
         let mut settings = SettingsRec::default();
         settings.read_desktop(&self.desktop);
         settings.dark = self.dark;
@@ -625,13 +750,8 @@ impl App {
         settings.cal_box_color = color(self.cal.box_color);
         settings.cal_box_size = self.cal.box_size;
         Saved {
-            version: 1,
-            notes: self
-                .data
-                .notes
-                .iter()
-                .map(|n| note_rec(dir, pics, n))
-                .collect(),
+            version: 2,
+            notes: vec![],
             projects: self.data.projects.clone(),
             links: self.data.links.clone(),
             wiki_tabs: self.extra.wiki_tabs.clone(),
@@ -679,15 +799,22 @@ impl App {
                 .map(|(a, b)| (*a, b.clone()))
                 .collect(),
             settings,
+            session: self
+                .studio
+                .windows
+                .iter()
+                .filter(|(_, w)| w.open)
+                .map(|(&i, w)| w.session(i))
+                .collect(),
         }
     }
     /// Replace the workspace with saved data.
-    pub fn restore(&mut self, s: &Saved, dir: &Path) {
+    pub fn restore(&mut self, s: &Saved) {
         self.data.notes = s
             .notes
             .iter()
             .enumerate()
-            .map(|(i, r)| note_from(dir, r, i))
+            .map(|(i, r)| note_from(r, i))
             .collect();
         self.data.projects = s.projects.clone();
         let count = self.data.notes.len();
@@ -755,26 +882,140 @@ impl App {
             self.cal.box_size = st.cal_box_size.min(200.);
         }
         self.studio.windows.clear();
+        // Memo windows left open (stickers on the desktop) come back.
+        for r in &s.session {
+            if self.data.notes.get(r.note).is_some_and(|n| !n.deleted) {
+                self.studio
+                    .windows
+                    .insert(r.note, crate::studio::Window::from_session(r));
+            }
+        }
         self.active = 0;
     }
-    /// Save when something changed, at most every two seconds (or now when
-    /// `force`, e.g. on exit).
+    /// Save what changed: after user input at most every two seconds, once a
+    /// minute regardless, or now when `force` (e.g. on exit).
     pub fn autosave(&mut self, now: f64, force: bool) {
-        if !force && now - self.saving.checked < 2. {
-            return;
+        if INPUT.swap(false, Ordering::Relaxed) {
+            self.saving.pending = true;
+        }
+        if !force {
+            if now - self.saving.checked < 2. {
+                return;
+            }
+            if !self.saving.pending && now - self.saving.checked < 60. {
+                return;
+            }
         }
         self.saving.checked = now;
+        self.saving.pending = false;
         let dir = data_dir(&self.prefs.data_path);
-        let snap = self.snapshot(&dir);
-        if self.saving.last.as_ref() == Some(&snap) {
+        if self.saving.dir.as_deref() != Some(dir.as_path()) {
+            self.switch_data_dir(&dir);
+        }
+        let meta = self.meta(&dir);
+        let notes: Vec<NoteRec> = self.data.notes.iter().map(note_rec).collect();
+        let changed: Vec<(usize, &NoteRec)> = notes
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| self.saving.notes.get(*i) != Some(*r))
+            .collect();
+        let meta_changed = self.saving.meta.as_ref() != Some(&meta);
+        let shrank = self.saving.notes.len() > notes.len();
+        if changed.is_empty() && !meta_changed && !shrank {
             return;
         }
-        match write(&dir, &snap) {
+        let result = self
+            .saving
+            .db
+            .as_mut()
+            .ok_or_else(|| self.saving.error.clone())
+            .and_then(|db| write(db, &changed, notes.len(), meta_changed.then_some(&meta)));
+        match result {
             Ok(()) => {
-                self.saving.last = Some(snap);
+                self.saving.notes = notes;
+                self.saving.meta = Some(meta);
                 self.saving.error.clear();
             }
             Err(e) => self.saving.error = format!("저장하지 못했습니다: {e}"),
+        }
+    }
+    /// Start saving into `dir`. Pictures of the previous data folder are
+    /// copied in the background and stay readable meanwhile; everything is
+    /// written in full to the new folder.
+    fn switch_data_dir(&mut self, dir: &Path) {
+        if let Some(old) = self.saving.dir.take() {
+            let (from, to) = (old.join("images"), dir.join("images"));
+            std::thread::spawn(move || copy_missing(&from, &to));
+        }
+        use_image_dir(dir);
+        self.saving.notes.clear();
+        self.saving.meta = None;
+        self.saving.db = match open(dir) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                self.saving.error = format!("저장하지 못했습니다: {e}");
+                None
+            }
+        };
+        self.saving.dir = Some(dir.to_path_buf());
+    }
+}
+
+/// Set by any user input (keys, clicks, wheel, drops) in any window; the
+/// next autosave then looks for changes.
+pub static INPUT: AtomicBool = AtomicBool::new(true);
+
+/// Watch user input in every window for `INPUT` and `lists::CHANGES`.
+pub fn watch_input(ctx: &egui::Context) {
+    ctx.on_begin_pass(
+        "autosave-input",
+        std::sync::Arc::new(|ctx| {
+            let input = ctx.input(|i| {
+                !i.raw.dropped_files.is_empty()
+                    || i.events.iter().any(|e| {
+                        !matches!(
+                            e,
+                            egui::Event::PointerMoved(_)
+                                | egui::Event::MouseMoved(_)
+                                | egui::Event::PointerGone
+                                | egui::Event::WindowFocused(_)
+                        )
+                    })
+            });
+            if input {
+                INPUT.store(true, Ordering::Relaxed);
+                FRAME_INPUT.store(true, Ordering::Relaxed);
+                crate::lists::CHANGES.fetch_add(1, Ordering::Relaxed);
+            }
+        }),
+    );
+    // Input changes data later in the same frame, after lists were made:
+    // count once more when the whole frame (the root pass) ends.
+    ctx.on_end_pass(
+        "list-changes",
+        std::sync::Arc::new(|ctx| {
+            if ctx.viewport_id() == egui::ViewportId::ROOT
+                && FRAME_INPUT.swap(false, Ordering::Relaxed)
+            {
+                crate::lists::CHANGES.fetch_add(1, Ordering::Relaxed);
+            }
+        }),
+    );
+}
+
+/// Input happened somewhere during the current frame.
+static FRAME_INPUT: AtomicBool = AtomicBool::new(false);
+
+/// Copy files of `from` missing in `to` (pictures are never changed in place).
+pub fn copy_missing(from: &Path, to: &Path) {
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(to);
+    for e in entries.flatten() {
+        let target = to.join(e.file_name());
+        if e.path().is_file() && !target.exists() {
+            let _ = std::fs::copy(e.path(), target);
         }
     }
 }
@@ -785,14 +1026,22 @@ impl App {
     /// open the start page chosen in settings.
     pub fn load_or_start(&mut self) {
         let dir = data_dir(&self.prefs.data_path);
+        use_image_dir(&dir);
         match read(&dir) {
-            Ok(Some(saved)) => self.restore(&saved, &dir),
+            Ok(Some(saved)) => self.restore(&saved),
             Ok(None) => self.start_fresh(),
             Err(e) => {
                 // Keep the unreadable file; never overwrite it.
                 let stamp = Local::now().format("%Y%m%d-%H%M%S");
-                let bad = dir.join(format!("data.broken-{stamp}.json"));
-                let _ = std::fs::rename(dir.join(FILE), &bad);
+                let (from, bad) = if dir.join(DB).exists() {
+                    (DB, dir.join(format!("data.broken-{stamp}.db")))
+                } else {
+                    (FILE, dir.join(format!("data.broken-{stamp}.json")))
+                };
+                let _ = std::fs::rename(dir.join(from), &bad);
+                for extra in ["-wal", "-shm"] {
+                    let _ = std::fs::remove_file(dir.join(format!("{DB}{extra}")));
+                }
                 self.start_fresh();
                 self.toast = format!(
                     "저장 파일을 읽지 못해 {}(으)로 옮겨 두었습니다 ({e})",
@@ -828,54 +1077,173 @@ impl App {
     }
 }
 
-/// Write `data.json` atomically (temp file, then rename).
-pub fn write(dir: &Path, snap: &Saved) -> Result<(), String> {
+fn open(dir: &Path) -> Result<rusqlite::Connection, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let text = serde_json::to_string(snap).map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, dir.join(FILE)).map_err(|e| e.to_string())
+    let db = rusqlite::Connection::open(dir.join(DB)).map_err(|e| e.to_string())?;
+    db.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, rec TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(db)
 }
 
-/// Read `data.json` from `dir`. `Ok(None)` when there is none yet.
+/// Write changed memos (and the rest, when given) in one transaction; memo
+/// rows from `count` on are removed.
+fn write(
+    db: &mut rusqlite::Connection,
+    notes: &[(usize, &NoteRec)],
+    count: usize,
+    meta: Option<&Saved>,
+) -> Result<(), String> {
+    let err = |e: rusqlite::Error| e.to_string();
+    let tx = db.transaction().map_err(err)?;
+    {
+        let mut put = tx
+            .prepare_cached("INSERT OR REPLACE INTO notes(id, rec) VALUES (?1, ?2)")
+            .map_err(err)?;
+        for (i, r) in notes {
+            let json = serde_json::to_string(r).map_err(|e| e.to_string())?;
+            put.execute(rusqlite::params![*i as i64, json])
+                .map_err(err)?;
+        }
+    }
+    tx.execute("DELETE FROM notes WHERE id >= ?1", [count as i64])
+        .map_err(err)?;
+    if let Some(m) = meta {
+        let json = serde_json::to_string(m).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('workspace', ?1)",
+            [json],
+        )
+        .map_err(err)?;
+    }
+    tx.commit().map_err(err)
+}
+
+/// Write a whole workspace into the database in `dir`.
+pub fn write_all(dir: &Path, saved: &Saved) -> Result<(), String> {
+    let mut db = open(dir)?;
+    let notes: Vec<(usize, &NoteRec)> = saved.notes.iter().enumerate().collect();
+    let meta = Saved {
+        notes: vec![],
+        ..saved.clone()
+    };
+    write(&mut db, &notes, notes.len(), Some(&meta))
+}
+
+/// Read the workspace from `dir`. `Ok(None)` when there is none yet. An
+/// older `data.json` is moved into the database (and kept, renamed). If an
+/// older version wrote `data.json` after the move (it is newer than the
+/// database), that newer data wins; the database is backed up first.
 pub fn read(dir: &Path) -> Result<Option<Saved>, String> {
-    let path = dir.join(FILE);
-    if !path.exists() {
+    let json = dir.join(FILE);
+    let modified = |name: &str| {
+        std::fs::metadata(dir.join(name))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    if dir.join(DB).exists() {
+        let db_time = modified(DB).max(modified(&format!("{DB}-wal")));
+        if !json.exists() || modified(FILE) <= db_time {
+            return read_db(&dir.join(DB)).map(Some);
+        }
+        backup(dir)?;
+    }
+    if !json.exists() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|e| e.to_string())
+    let saved = read_file(&json)?;
+    write_all(dir, &saved)?;
+    let _ = std::fs::rename(&json, dir.join("data.before-db.json"));
+    Ok(Some(saved))
 }
 
-/// Read a backed-up `data.json` the user picked.
+fn read_db(path: &Path) -> Result<Saved, String> {
+    let err = |e: rusqlite::Error| e.to_string();
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(err)?;
+    let meta: String = db
+        .query_row("SELECT value FROM meta WHERE key = 'workspace'", [], |r| {
+            r.get(0)
+        })
+        .map_err(err)?;
+    let mut saved: Saved = serde_json::from_str(&meta).map_err(|e| e.to_string())?;
+    let mut rows = db
+        .prepare("SELECT id, rec FROM notes ORDER BY id")
+        .map_err(err)?;
+    let rows = rows
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(err)?;
+    for row in rows {
+        let (id, json) = row.map_err(err)?;
+        let rec: NoteRec = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        // Memo numbers are positions; a gap would shift every later memo.
+        while (saved.notes.len() as i64) < id {
+            saved.notes.push(NoteRec {
+                purged: true,
+                deleted: true,
+                ..Default::default()
+            });
+        }
+        saved.notes.push(rec);
+    }
+    Ok(saved)
+}
+
+/// Read a backup the user picked: a `data.db`, or a `data.json` from older
+/// versions.
 pub fn read_file(path: &Path) -> Result<Saved, String> {
+    if path.extension().is_some_and(|e| e == "db") {
+        return read_db(path);
+    }
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-/// Copy the data file and its pictures into `backups\<time>\`.
+/// Copy the database into `backups\<time>\data.db`. Pictures are not copied:
+/// they are never changed or deleted, so the images folder serves every
+/// backup.
 pub fn backup(dir: &Path) -> Result<PathBuf, String> {
     let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let target = dir.join("backups").join(stamp);
-    std::fs::create_dir_all(target.join("images")).map_err(|e| e.to_string())?;
-    std::fs::copy(dir.join(FILE), target.join(FILE)).map_err(|e| e.to_string())?;
-    if let Ok(entries) = std::fs::read_dir(dir.join("images")) {
-        for e in entries.flatten() {
-            let _ = std::fs::copy(e.path(), target.join("images").join(e.file_name()));
-        }
+    let mut target = dir.join("backups").join(&stamp);
+    let mut n = 1;
+    while target.join(DB).exists() {
+        n += 1;
+        target = dir.join("backups").join(format!("{stamp}-{n}"));
     }
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    let db = open(dir)?;
+    db.execute("VACUUM INTO ?1", [target.join(DB).to_string_lossy()])
+        .map_err(|e| e.to_string())?;
     Ok(target)
 }
 
 /// Autosave bookkeeping kept in `App`.
 #[derive(Default)]
 pub struct Saving {
-    pub last: Option<Saved>,
+    /// Memos and the rest as last written.
+    notes: Vec<NoteRec>,
+    meta: Option<Saved>,
     pub checked: f64,
+    /// Input happened since the last check.
+    pending: bool,
     pub error: String,
-    pub pictures: Pictures,
+    dir: Option<PathBuf>,
+    db: Option<rusqlite::Connection>,
+}
+
+impl Saving {
+    /// Write everything again at the next autosave.
+    pub fn rewrite(&mut self) {
+        self.notes.clear();
+        self.meta = None;
+        self.checked = f64::MIN;
+        self.pending = true;
+    }
 }
 
 #[cfg(test)]
@@ -908,11 +1276,12 @@ mod tests {
         a.data.notes[3].locked = true;
         a.dark = true;
         let snap = a.snapshot(&dir);
-        write(&dir, &snap).unwrap();
+        write_all(&dir, &snap).unwrap();
         let loaded = read(&dir).unwrap().unwrap();
         assert!(loaded == snap);
+        use_image_dir(&dir);
         let mut b = App::sample(NaiveDate::from_ymd_opt(2026, 11, 11).unwrap());
-        b.restore(&loaded, &dir);
+        b.restore(&loaded);
         assert_eq!(b.data.notes.len(), a.data.notes.len());
         assert_eq!(b.data.notes[1].title, "기간 일정");
         assert_eq!(b.data.notes[1].duration, 3);
@@ -923,11 +1292,79 @@ mod tests {
         assert!(check_password(&b.desktop.passwords[&3], "1234"));
         assert!(!check_password(&b.desktop.passwords[&3], "0000"));
         match &b.data.notes[0].document.tabs[0].blocks.last() {
-            Some(Block::Picture(p)) => assert_eq!(p.pixels, vec![255, 0, 0, 255]),
+            Some(Block::Picture(p)) => {
+                // Not in memory until shown, then read from its file.
+                assert!(p.pixels.is_empty());
+                assert_eq!(&*p.rgba(), &[255, 0, 0, 255]);
+                assert!(thumbnail(p).is_some());
+            }
             _ => panic!("picture not restored"),
         }
         // Saving the restored workspace changes nothing.
         assert!(b.snapshot(&dir) == snap);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp(tag: u32) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("omnimemojang-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn autosave_writes_changed_memos_and_reopens_stickers() {
+        let dir = temp(line!());
+        let day = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let mut a = App::sample(day);
+        a.prefs.data_path = dir.display().to_string();
+        a.studio.open(2, None);
+        a.studio.windows.get_mut(&2).unwrap().sticker();
+        a.autosave(0., true);
+        assert!(dir.join(DB).exists());
+        // Nothing changed and no input: no write is attempted.
+        a.data.notes[1].title = "바뀐 제목".into();
+        INPUT.store(false, Ordering::Relaxed);
+        a.autosave(10., false);
+        assert_ne!(read(&dir).unwrap().unwrap().notes[1].title, "바뀐 제목");
+        // After input the change is written.
+        INPUT.store(true, Ordering::Relaxed);
+        a.autosave(20., false);
+        let loaded = read(&dir).unwrap().unwrap();
+        assert_eq!(loaded.notes[1].title, "바뀐 제목");
+        assert_eq!(loaded.notes.len(), a.data.notes.len());
+        let mut b = App::sample(day);
+        b.restore(&loaded);
+        let w = &b.studio.windows[&2];
+        assert!(w.open);
+        assert_eq!(w.mode, crate::studio::Mode::Sticker);
+        assert_eq!(b.studio.windows.len(), 1);
+        drop(a);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_data_json_moves_into_the_database() {
+        let dir = temp(line!());
+        let mut a = App::sample(NaiveDate::from_ymd_opt(2026, 11, 12).unwrap());
+        let snap = a.snapshot(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(FILE), serde_json::to_string(&snap).unwrap()).unwrap();
+        let loaded = read(&dir).unwrap().unwrap();
+        assert!(loaded == snap);
+        assert!(dir.join(DB).exists());
+        assert!(!dir.join(FILE).exists());
+        assert!(dir.join("data.before-db.json").exists());
+        assert!(read(&dir).unwrap().unwrap() == snap);
+        let b = backup(&dir).unwrap();
+        assert!(read_file(&b.join(DB)).unwrap() == snap);
+        // An older version writing data.json later: the newer file wins.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut newer = snap.clone();
+        newer.notes[0].title = "이전 버전에서 쓴 메모".into();
+        std::fs::write(dir.join(FILE), serde_json::to_string(&newer).unwrap()).unwrap();
+        assert!(read(&dir).unwrap().unwrap() == newer);
+        assert!(read(&dir).unwrap().unwrap() == newer);
+        assert!(!dir.join(FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

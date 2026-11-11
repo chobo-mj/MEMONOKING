@@ -2,7 +2,6 @@
 use crate::composer::{Block, Picture, Table};
 use crate::*;
 use std::borrow::Cow;
-use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
@@ -187,7 +186,7 @@ impl App {
             .iter()
             .filter_map(
                 |&(i, t, b)| match &self.data.notes[i].document.tabs[t].blocks[b] {
-                    Block::Picture(p) => Some(p.pixels.len()),
+                    Block::Picture(p) => Some(p.width * p.height * 4),
                     _ => None,
                 },
             )
@@ -275,7 +274,16 @@ impl App {
                                 .show(ui, |ui| {
                                     ui.set_width(width - 20.);
                                     let display_width = width - 20.;
-                                    if let Ok(texture) = picture_texture(ui, (i, t, b), picture) {
+                                    // Thumbnails are made only for cards scrolled into view.
+                                    let visible = ui.is_rect_visible(egui::Rect::from_min_size(
+                                        ui.cursor().min,
+                                        Vec2::new(display_width, 150.),
+                                    ));
+                                    if !visible {
+                                        ui.allocate_space(Vec2::new(display_width, 150.));
+                                    } else if let Ok(texture) =
+                                        picture_texture(ui, (i, t, b), picture)
+                                    {
                                         let factor = (display_width / picture.width as f32)
                                             .min(150. / picture.height as f32);
                                         let size = Vec2::new(
@@ -323,7 +331,11 @@ impl App {
                     if copy {
                         self.toast = validate_picture(picture)
                             .and_then(|_| {
-                                copy_rgba(picture.width, picture.height, picture.pixels.clone())
+                                copy_rgba(
+                                    picture.width,
+                                    picture.height,
+                                    picture.rgba().into_owned(),
+                                )
                             })
                             .map(|_| "이미지를 복사했습니다".into())
                             .unwrap_or_else(|e| format!("복사 실패: {e}"));
@@ -429,12 +441,7 @@ fn copy_rgba(width: usize, height: usize, pixels: Vec<u8>) -> Result<(), String>
 }
 
 fn validate_picture(p: &Picture) -> Result<(), String> {
-    if p.width == 0
-        || p.height == 0
-        || p.width > 8192
-        || p.height > 8192
-        || p.width.checked_mul(p.height).and_then(|n| n.checked_mul(4)) != Some(p.pixels.len())
-    {
+    if p.width == 0 || p.height == 0 || p.width > 8192 || p.height > 8192 {
         return Err("이미지 크기 또는 픽셀 데이터가 올바르지 않습니다".into());
     }
     Ok(())
@@ -442,7 +449,7 @@ fn validate_picture(p: &Picture) -> Result<(), String> {
 
 fn picture_png(p: &Picture) -> Result<Vec<u8>, String> {
     validate_picture(p)?;
-    let image = image::RgbaImage::from_raw(p.width as u32, p.height as u32, p.pixels.clone())
+    let image = image::RgbaImage::from_raw(p.width as u32, p.height as u32, p.rgba().into_owned())
         .ok_or("이미지 변환 실패")?;
     let mut bytes = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image)
@@ -457,21 +464,21 @@ fn picture_texture(
     picture: &Picture,
 ) -> Result<egui::TextureHandle, String> {
     validate_picture(picture)?;
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    picture.pixels.hash(&mut hash);
     let id = egui::Id::new((
         "content_picture_texture",
         source,
         picture.width,
         picture.height,
-        hash.finish(),
+        &picture.file,
     ));
     if let Some(texture) = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Ok(texture);
     }
+    // A small thumbnail, not the full picture.
+    let thumb = crate::storage::thumbnail(picture).ok_or("이미지를 읽을 수 없습니다")?;
     let texture = ui.ctx().load_texture(
         format!("document-image-{}-{}-{}", source.0, source.1, source.2),
-        egui::ColorImage::from_rgba_unmultiplied([picture.width, picture.height], &picture.pixels),
+        thumb,
         egui::TextureOptions::LINEAR,
     );
     ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));

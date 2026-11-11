@@ -26,8 +26,6 @@ pub struct Desktop {
     pub sound: bool,
     pub popup: bool,
     pub mute: bool,
-    pub image_limit: f32,
-    pub image_age: usize,
     pub calendar_basis: usize,
     pub deleted_at: BTreeMap<usize, NaiveDateTime>,
     pub passwords: BTreeMap<usize, String>,
@@ -87,8 +85,6 @@ impl Default for Desktop {
             sound: true,
             popup: true,
             mute: false,
-            image_limit: 5.,
-            image_age: 0,
             calendar_basis: 1,
             deleted_at: BTreeMap::new(),
             passwords: BTreeMap::new(),
@@ -340,7 +336,7 @@ impl App {
     /// current data.
     pub fn restore_from_backup(&mut self, dir: &std::path::Path) {
         let Some(file) = rfd::FileDialog::new()
-            .add_filter("OmniMemoJang 데이터", &["json"])
+            .add_filter("OmniMemoJang 데이터", &["db", "json"])
             .set_directory(dir.join("backups"))
             .pick_file()
         else {
@@ -353,10 +349,10 @@ impl App {
         let _ = crate::storage::backup(dir);
         match crate::storage::read_file(&file) {
             Ok(saved) => {
-                self.restore(&saved, from);
-                // Pictures of the backup become the current data's pictures.
-                self.saving.last = None;
-                self.saving.pictures = Default::default();
+                // Backups from older versions carry their own pictures.
+                crate::storage::copy_missing(&from.join("images"), &dir.join("images"));
+                self.restore(&saved);
+                self.saving.rewrite();
                 self.autosave(0., true);
                 self.desktop.last_action = format!("복원했습니다: {}", file.display());
             }
@@ -1236,30 +1232,12 @@ impl App {
                 });
                 hint(
                     ui,
-                    "복원하기 전에 지금 데이터를 자동으로 한 번 더 백업합니다 · 백업 폴더의 data.json을 고르세요",
-                );
-                section(ui, "이미지 최대 저장 용량");
-                ui.add(
-                    egui::Slider::new(&mut self.desktop.image_limit, 0.5..=10.)
-                        .step_by(0.5)
-                        .suffix(" GB"),
-                );
-                section(ui, "오래된 이미지 정리");
-                segmented(
-                    ui,
-                    &mut self.desktop.image_age,
-                    &["용량 기준", "1년 이상", "2년 이상", "3년 이상"],
+                    "복원하기 전에 지금 데이터를 자동으로 한 번 더 백업합니다 · 백업 폴더의 data.db를 고르세요 (이전 버전 백업은 data.json)",
                 );
                 hint(
                     ui,
-                    "정리 기준은 저장해 둡니다 · 자동 정리는 다음 버전에서 동작합니다",
+                    "이미지는 화면에 보일 때만 불러오므로 용량이 커져도 느려지지 않습니다 · 이미지는 지우지 않고 모든 백업이 함께 씁니다",
                 );
-                ui.add_space(6.);
-                if ui.button("썸네일 처리된 원본 일괄 정리").clicked() {
-                    self.desktop.last_action =
-                        "이미지 자동 정리는 다음 버전에서 동작합니다. 지금은 파일을 지우지 않습니다."
-                            .into();
-                }
             }
             _ => {
                 crate::ui::banner(ui, Vec2::new(260., 64.));

@@ -256,7 +256,11 @@ impl App {
             self.catalog_folders(ui);
         } else {
             self.catalog_controls(ui);
-            let ids = self.catalog_filtered_ids();
+            let mut cache = std::mem::take(&mut self.lists);
+            let key = crate::lists::key(self.data.notes.len());
+            let ids = cache.get("catalog", key, || self.catalog_filtered_ids());
+            self.lists = cache;
+            let ids = (*ids).clone();
             self.catalog_find_bar(ui, &ids);
             let rows: Vec<_> = ids
                 .into_iter()
@@ -272,6 +276,20 @@ impl App {
         self.filters(ui);
         ui.add_space(10.);
         let today = Local::now().date_naive();
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key((mode, today, self.data.notes.len()));
+        let rows = cache.get("detail", key, || self.detail_rows(mode, today));
+        self.lists = cache;
+        let ids: Vec<_> = rows.iter().map(|&(i, _)| i).collect();
+        self.catalog_find_bar(ui, &ids);
+        // Title and body clicks only show the memo in the preview; the eye
+        // column opens it as a sticker.
+        self.catalog_split_list(ui, &rows, false, true);
+        self.catalog_replace_window(ui.ctx());
+    }
+
+    /// Rows of the detail list (each day of a multi-day memo is a row).
+    fn detail_rows(&self, mode: usize, today: NaiveDate) -> Vec<(usize, Option<NaiveDate>)> {
         let mut rows = vec![];
         for (i, n) in self.data.notes.iter().enumerate() {
             if !self.matches_search(i)
@@ -301,12 +319,7 @@ impl App {
             }
         }
         rows.sort_by_key(|&(i, d)| (d.unwrap_or(NaiveDate::MAX), self.data.notes[i].time, i));
-        let ids: Vec<_> = rows.iter().map(|&(i, _)| i).collect();
-        self.catalog_find_bar(ui, &ids);
-        // Title and body clicks only show the memo in the preview; the eye
-        // column opens it as a sticker.
-        self.catalog_split_list(ui, &rows, false, true);
-        self.catalog_replace_window(ui.ctx());
+        rows
     }
 
     fn catalog_filtered_ids(&self) -> Vec<usize> {
@@ -704,7 +717,16 @@ impl App {
                             previous = day;
                         }
                     }
-                    self.catalog_table_row(ui, row, at, open_editor, trash, &mut pending);
+                    let key = match row {
+                        TableRow::Note(i, d) => {
+                            (0, i, d.map(|d| d.num_days_from_ce()).unwrap_or(0))
+                        }
+                        TableRow::Tab(i, t) => (1, i, t as i32),
+                    };
+                    let selected = self.catalog.selected == Some(key.1);
+                    crate::lists::lazy_row(ui, key, 36., selected, |ui| {
+                        self.catalog_table_row(ui, row, at, open_editor, trash, &mut pending)
+                    });
                 }
             });
         self.catalog.table_offset = body.state.offset.x;
