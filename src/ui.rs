@@ -1040,14 +1040,14 @@ fn pick_cell(ui: &mut Ui, selected: bool, text: String) -> Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The OmniMemoJang banner: a warm gradient card with a typographic
+/// The OmniMemoJang banner: a calm slate gradient card with a typographic
 /// wordmark, drawn with shapes so it stays sharp at every scale.
 pub fn banner(ui: &mut Ui, size: Vec2) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    // Left-to-right gradient, coral to apricot.
-    let left = Color32::from_rgb(222, 86, 62);
-    let right = Color32::from_rgb(244, 156, 92);
+    // Left-to-right gradient in calm slate blues.
+    let left = Color32::from_rgb(58, 72, 92);
+    let right = Color32::from_rgb(102, 122, 146);
     let mut mesh = egui::Mesh::default();
     mesh.colored_vertex(rect.left_top(), left);
     mesh.colored_vertex(rect.right_top(), right);
@@ -1105,8 +1105,8 @@ pub fn banner(ui: &mut Ui, size: Vec2) -> Response {
         let mut job = egui::text::LayoutJob::default();
         for (text, color) in [
             ("Omni", Color32::WHITE),
-            ("Memo", Color32::from_rgb(255, 238, 222)),
-            ("Jang", Color32::from_rgb(255, 226, 160)),
+            ("Memo", Color32::from_rgb(214, 226, 238)),
+            ("Jang", Color32::from_rgb(232, 212, 172)),
         ] {
             job.append(
                 text,
