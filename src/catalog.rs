@@ -275,6 +275,7 @@ impl App {
         let mut rows = vec![];
         for (i, n) in self.data.notes.iter().enumerate() {
             if !self.matches_search(i)
+                || self.is_guide(i)
                 || (!self.recurring && n.recurring)
                 || !crate::refinements::project_match(self.project_filter, n.project)
                 || (self.desktop.hide_locked && n.locked)

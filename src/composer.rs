@@ -95,6 +95,28 @@ pub struct Picture {
     pub fit: bool,
     texture: Option<egui::TextureHandle>,
 }
+impl Picture {
+    /// A picture from RGBA pixels (used when loading saved memos).
+    pub fn from_rgba(
+        id: u32,
+        name: String,
+        pixels: Vec<u8>,
+        size: [usize; 2],
+        scale: f32,
+        fit: bool,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            pixels,
+            width: size[0],
+            height: size[1],
+            scale,
+            fit,
+            texture: None,
+        }
+    }
+}
 #[derive(Clone)]
 pub enum Block {
     Table(Table),

@@ -346,6 +346,7 @@ impl App {
         let mut rows = vec![];
         for (i, n) in self.data.notes.iter().enumerate() {
             if !self.matches_search(i)
+                || self.is_guide(i)
                 || (self.desktop.hide_locked && n.locked)
                 || (self.desktop.hide_completed
                     && n.done
@@ -661,7 +662,9 @@ impl App {
             .notes
             .iter()
             .enumerate()
-            .filter(|(i, n)| self.visible(*i) && self.calendar_matches(n, self.day))
+            .filter(|(i, n)| {
+                self.visible(*i) && !self.is_guide(*i) && self.calendar_matches(n, self.day)
+            })
             .map(|(i, _)| i)
             .collect();
         if ids.is_empty() {
@@ -697,7 +700,7 @@ impl App {
             let shown_day = |c: usize| whole_weeks || days[c].month() == month;
             let mut segments = band_segments(
                 &self.data.notes,
-                |i| self.visible(i),
+                |i| self.visible(i) && !self.is_guide(i),
                 |n, d| self.calendar_matches(n, d) && !(hide_done && n.done_on(Some(d))),
                 &days,
                 shown_day,

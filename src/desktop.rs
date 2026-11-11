@@ -26,12 +26,13 @@ pub struct Desktop {
     pub sound: bool,
     pub popup: bool,
     pub mute: bool,
-    pub data_path: String,
     pub image_limit: f32,
     pub image_age: usize,
     pub calendar_basis: usize,
     pub deleted_at: BTreeMap<usize, NaiveDateTime>,
     pub passwords: BTreeMap<usize, String>,
+    /// When each password memo was last unlocked (for automatic re-locking).
+    pub unlocked_at: BTreeMap<usize, std::time::Instant>,
     pub lock_target: Option<(usize, bool, bool)>,
     pub lock_input: String,
     pub lock_confirm: String,
@@ -86,12 +87,12 @@ impl Default for Desktop {
             sound: true,
             popup: true,
             mute: false,
-            data_path: String::new(),
             image_limit: 5.,
             image_age: 0,
             calendar_basis: 1,
             deleted_at: BTreeMap::new(),
             passwords: BTreeMap::new(),
+            unlocked_at: BTreeMap::new(),
             lock_target: None,
             lock_input: String::new(),
             lock_confirm: String::new(),
@@ -335,6 +336,96 @@ impl App {
         self.data.notes[i].body.replace_range(..remove, "");
         self.toast = format!("#{name} 프로젝트에 추가했습니다");
     }
+    /// Pick a backed-up `data.json` and load it, after backing up the
+    /// current data.
+    pub fn restore_from_backup(&mut self, dir: &std::path::Path) {
+        let Some(file) = rfd::FileDialog::new()
+            .add_filter("OmniMemoJang 데이터", &["json"])
+            .set_directory(dir.join("backups"))
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(from) = file.parent() else {
+            return;
+        };
+        self.autosave(0., true);
+        let _ = crate::storage::backup(dir);
+        match crate::storage::read_file(&file) {
+            Ok(saved) => {
+                self.restore(&saved, from);
+                // Pictures of the backup become the current data's pictures.
+                self.saving.last = None;
+                self.saving.pictures = Default::default();
+                self.autosave(0., true);
+                self.desktop.last_action = format!("복원했습니다: {}", file.display());
+            }
+            Err(e) => self.desktop.last_action = format!("복원하지 못했습니다: {e}"),
+        }
+    }
+    /// Lock password memos again 1, 5 or 15 minutes after they were
+    /// unlocked (the last choice keeps them open until the app restarts).
+    pub fn auto_relock(&mut self) {
+        let Some(minutes) = [1u64, 5, 15].get(self.desktop.auto_lock).copied() else {
+            return;
+        };
+        let limit = std::time::Duration::from_secs(minutes * 60);
+        let expired: Vec<usize> = self
+            .desktop
+            .unlocked_at
+            .iter()
+            .filter(|(_, at)| at.elapsed() >= limit)
+            .map(|(i, _)| *i)
+            .collect();
+        for i in expired {
+            self.desktop.unlocked_at.remove(&i);
+            if self.desktop.passwords.contains_key(&i) {
+                if let Some(n) = self.data.notes.get_mut(i) {
+                    n.locked = true;
+                }
+            }
+        }
+    }
+    /// Erase a memo's content for good (it stays as an empty tombstone so
+    /// memo indexes keep their meaning).
+    pub fn purge_note(&mut self, i: usize) {
+        let n = &mut self.data.notes[i];
+        n.body.clear();
+        n.title = "삭제된 메모".into();
+        n.document = Default::default();
+        n.wiki_comments.clear();
+        n.journal_comments.clear();
+        n.occurrence_comments.clear();
+        n.reminder = None;
+        n.purged = true;
+        n.deleted = true;
+        self.desktop.passwords.remove(&i);
+        self.desktop.deleted_at.remove(&i);
+    }
+    /// Erase memos that sat in the trash longer than the retention setting
+    /// (7, 30, 90 or 365 days; the last choice keeps them).
+    pub fn purge_expired_trash(&mut self, now: NaiveDateTime) {
+        let Some(days) = [7, 30, 90, 365].get(self.desktop.retention).copied() else {
+            return;
+        };
+        let expired: Vec<usize> = self
+            .desktop
+            .deleted_at
+            .iter()
+            .filter(|(i, at)| {
+                now - **at > Duration::days(days)
+                    && self
+                        .data
+                        .notes
+                        .get(**i)
+                        .is_some_and(|n| n.deleted && !n.purged)
+            })
+            .map(|(i, _)| *i)
+            .collect();
+        for i in expired {
+            self.purge_note(i);
+        }
+    }
     pub fn trash_note(&mut self, i: usize) {
         self.data.notes[i].deleted = true;
         self.desktop
@@ -537,16 +628,21 @@ impl App {
                     !self.desktop.lock_input.is_empty()
                         && self.desktop.lock_input == self.desktop.lock_confirm
                 } else {
-                    self.desktop.passwords.get(&i) == Some(&self.desktop.lock_input)
+                    self.desktop.passwords.get(&i).is_some_and(|h| {
+                        crate::storage::check_password(h, &self.desktop.lock_input)
+                    })
                 };
                 if valid {
                     if set {
                         self.desktop
                             .passwords
-                            .insert(i, self.desktop.lock_input.clone());
+                            .insert(i, crate::storage::hash_password(&self.desktop.lock_input));
                         self.data.notes[i].locked = true;
                     } else {
                         self.data.notes[i].locked = false;
+                        self.desktop
+                            .unlocked_at
+                            .insert(i, std::time::Instant::now());
                         if sticker {
                             self.open_sticker(i, self.data.notes[i].date);
                         } else {
@@ -692,16 +788,7 @@ impl App {
                 },
             );
             if purge {
-                let n = &mut self.data.notes[i];
-                n.body.clear();
-                n.title = "삭제된 메모".into();
-                n.document = Default::default();
-                n.wiki_comments.clear();
-                n.journal_comments.clear();
-                n.occurrence_comments.clear();
-                n.purged = true;
-                n.deleted = true;
-                self.desktop.passwords.remove(&i);
+                self.purge_note(i);
                 self.desktop.purge_target = None;
             }
             if !open {
@@ -800,7 +887,7 @@ impl App {
                     ui,
                     &mut self.desktop.taskbar,
                     "메모창을 작업표시줄에 표시",
-                    "끄면 트레이 아이콘으로만 표시합니다",
+                    "끄면 새로 여는 스티커 메모 창이 작업표시줄에 나타나지 않습니다",
                 );
                 section(ui, "새 스티커 메모 크기");
                 let mut preset = match self.desktop.sticker_size {
@@ -912,10 +999,9 @@ impl App {
                     &mut self.desktop.auto_lock,
                     &["1분", "5분", "15분", "Windows 잠금 때만"],
                 );
-                ui.add_space(14.);
                 hint(
                     ui,
-                    "운영체제 연동과 자동 정리 타이머는 후속 단계에서 연결됩니다.",
+                    "휴지통은 프로그램을 켤 때 정리합니다 · 잠긴 메모는 연 뒤 정한 시간이 지나면 다시 잠깁니다",
                 );
             }
             1 => {
@@ -1053,11 +1139,11 @@ impl App {
                 ui.add_space(10.);
                 hint(
                     ui,
-                    "Windows 알림센터 연동 · 알람 메모 강조 · 트레이 상주는 후속 단계입니다.",
+                    "알람 시각이 되면 화면 오른쪽 아래에 알림 창이 뜹니다 · 꺼져 있던 동안 지난 알람은 다음 실행 때 보여 줍니다",
                 );
                 ui.add_space(6.);
-                if ui.button("알림 모양 미리보기").clicked() {
-                    self.desktop.last_action = "알림 미리보기 · 메모를 확인할 시간입니다".into();
+                if ui.button("소리 들어 보기").clicked() {
+                    crate::system::alert_sound();
                 }
             }
             5 => {
@@ -1110,22 +1196,45 @@ impl App {
                 section(ui, "데이터 위치");
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.desktop.data_path)
+                        egui::TextEdit::singleline(&mut self.prefs.data_path)
                             .desired_width(ui.available_width() - 90.)
                             .margin(egui::Margin::symmetric(8, 5))
                             .hint_text("데이터 저장 폴더"),
                     );
                     if ui.button("폴더 선택").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.desktop.data_path = path.display().to_string();
+                            self.prefs.data_path = path.display().to_string();
                         }
                     }
                 });
-                ui.add_space(4.);
-                if ui.button("데이터 가져오기…").clicked() {
-                    self.desktop.last_action =
-                        "가져오기 화면 미리보기입니다. 실제 데이터는 변경하지 않았습니다.".into();
+                let dir = crate::storage::data_dir(&self.prefs.data_path);
+                hint(
+                    ui,
+                    format!(
+                        "메모·위키·설정은 자동으로 저장됩니다 · 지금 위치: {}",
+                        dir.display()
+                    ),
+                );
+                if !self.saving.error.is_empty() {
+                    ui.colored_label(ACCENT, &self.saving.error);
                 }
+                section(ui, "백업 / 복원");
+                ui.horizontal(|ui| {
+                    if crate::ui::primary(ui, "지금 백업").clicked() {
+                        self.autosave(0., true);
+                        self.desktop.last_action = match crate::storage::backup(&dir) {
+                            Ok(p) => format!("백업했습니다: {}", p.display()),
+                            Err(e) => format!("백업하지 못했습니다: {e}"),
+                        };
+                    }
+                    if ui.button("백업에서 복원…").clicked() {
+                        self.restore_from_backup(&dir);
+                    }
+                });
+                hint(
+                    ui,
+                    "복원하기 전에 지금 데이터를 자동으로 한 번 더 백업합니다 · 백업 폴더의 data.json을 고르세요",
+                );
                 section(ui, "이미지 최대 저장 용량");
                 ui.add(
                     egui::Slider::new(&mut self.desktop.image_limit, 0.5..=10.)
@@ -1145,14 +1254,23 @@ impl App {
                         "정리 정책을 선택했습니다. 이번 미리보기에서는 파일을 삭제하지 않습니다."
                             .into();
                 }
-                ui.add_space(10.);
-                hint(ui, "저장·백업 엔진은 아직 연결 전입니다.");
             }
             _ => {
                 crate::ui::banner(ui, Vec2::new(260., 64.));
-                hint(ui, "개인 메모와 일정 작업 공간 · UI 미리보기 0.2.0");
+                hint(
+                    ui,
+                    format!(
+                        "개인 메모와 일정 작업 공간 · 버전 {}",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                );
                 ui.add_space(10.);
-                ui.label("화면·조작 미리보기입니다. 앱을 종료하면 메모와 설정이 초기화됩니다.");
+                ui.label("메모·위키·설정은 자동으로 저장됩니다.");
+                ui.add_space(6.);
+                if ui.button("사용법 보기").clicked() {
+                    self.open_guide();
+                    self.settings = false;
+                }
             }
         }
     }

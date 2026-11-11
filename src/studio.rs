@@ -952,6 +952,7 @@ impl App {
                 .with_resizable(!locked && mode != Mode::Swatch)
                 .with_transparent(true)
                 .with_decorations(false)
+                .with_taskbar(self.desktop.taskbar)
                 .with_window_level(if top {
                     egui::WindowLevel::AlwaysOnTop
                 } else {

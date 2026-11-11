@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod alarm;
 mod calendar_dock;
 mod catalog;
 mod composer;
@@ -6,6 +7,7 @@ mod content_collections;
 mod desktop;
 mod dragging;
 mod extras;
+mod guide;
 mod icons;
 mod media;
 mod model;
@@ -14,7 +16,9 @@ mod prefs;
 mod refinements;
 mod repeat;
 mod schedule;
+mod storage;
 mod studio;
+mod system;
 mod ui;
 mod views;
 mod win_style;
@@ -62,6 +66,11 @@ struct App {
     /// Settings kept between runs, and the text last written to disk.
     prefs: prefs::Prefs,
     prefs_saved: String,
+    /// Autosave state for memos, wiki and settings.
+    saving: storage::Saving,
+    alarms: alarm::Alarms,
+    /// Autostart value last written to Windows (`None` before the first check).
+    autostart_applied: Option<bool>,
     settings: bool,
     month: NaiveDate,
     day: NaiveDate,
@@ -129,9 +138,9 @@ impl App {
         cc.egui_ctx.set_fonts(fonts);
         let mut a = Self::sample(Local::now().date_naive());
         a.prefs = prefs::Prefs::load();
-        a.prefs_saved = a.prefs.to_text();
         a.cal.theme = a.prefs.cal_theme;
-        a.page = a.prefs.start_page;
+        a.load_or_start();
+        a.prefs_saved = a.prefs.to_text();
         a.hotkeys = GlobalHotKeyManager::new().ok();
         a.apply_shortcuts();
         a
@@ -157,6 +166,9 @@ impl App {
             cal: calendar_dock::Dock::default(),
             prefs: prefs::Prefs::default(),
             prefs_saved: String::new(),
+            saving: storage::Saving::default(),
+            alarms: alarm::Alarms::default(),
+            autostart_applied: None,
             settings: false,
             month: today.with_day(1).unwrap(),
             day: today,
@@ -327,6 +339,9 @@ impl eframe::App for App {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0., 0., 0., 0.]
     }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.autosave(0., true);
+    }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.theme(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -364,6 +379,10 @@ impl eframe::App for App {
         self.global_dialogs(ctx);
         self.extra_windows(ctx);
         self.desktop_dialogs(ctx);
+        self.check_alarms(ctx);
+        self.auto_relock();
+        self.apply_autostart();
+        self.autosave(ctx.input(|i| i.time), false);
     }
 }
 impl App {
@@ -722,6 +741,26 @@ impl App {
     }
 }
 impl App {
+    /// Keep Windows' start-up entry in step with the setting. At start-up an
+    /// enabled entry is rewritten so it follows the program if it moved.
+    fn apply_autostart(&mut self) {
+        let want = self.desktop.autostart;
+        if self.autostart_applied == Some(want) {
+            return;
+        }
+        if self.autostart_applied.is_none() && !want {
+            self.autostart_applied = Some(false);
+            return;
+        }
+        match system::set_autostart(want) {
+            Ok(()) => self.autostart_applied = Some(want),
+            Err(e) => {
+                self.toast = e;
+                self.desktop.autostart = !want;
+                self.autostart_applied = Some(!want);
+            }
+        }
+    }
     /// Save changed settings, and leave a page whose menu was hidden.
     fn keep_prefs(&mut self) {
         self.prefs.cal_theme = self.cal.theme;
@@ -730,6 +769,11 @@ impl App {
         }
         let text = self.prefs.to_text();
         if text != self.prefs_saved {
+            // A new data folder gets a full save right away.
+            if prefs::Prefs::from_text(&self.prefs_saved).data_path != self.prefs.data_path {
+                self.saving.last = None;
+                self.saving.checked = f64::MIN;
+            }
             self.prefs.save();
             self.prefs_saved = text;
         }

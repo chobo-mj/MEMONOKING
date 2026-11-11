@@ -4,7 +4,7 @@
 use chrono::{Datelike, Duration, NaiveDate, Weekday};
 
 /// How a schedule repeats after its first date.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Repeat {
     #[default]
     None,

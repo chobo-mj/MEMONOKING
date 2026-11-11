@@ -18,6 +18,10 @@ pub struct Prefs {
     pub cal_strike: bool,
     /// 0: month, 1: one week, 2: two weeks.
     pub cal_weeks: usize,
+    /// Data folder chosen in settings (empty: the default folder).
+    pub data_path: String,
+    /// The usage guide was shown on the first run.
+    pub first_run_done: bool,
 }
 
 impl Default for Prefs {
@@ -30,6 +34,8 @@ impl Default for Prefs {
             cal_hide_done: false,
             cal_strike: true,
             cal_weeks: 0,
+            data_path: String::new(),
+            first_run_done: false,
         }
     }
 }
@@ -38,7 +44,7 @@ impl Prefs {
     pub fn to_text(&self) -> String {
         let hidden: Vec<String> = self.hidden_pages.iter().map(|p| p.to_string()).collect();
         format!(
-            "start_page={}\nhidden_pages={}\ncal_theme={}\ncal_font={}\ncal_hide_done={}\ncal_strike={}\ncal_weeks={}\n",
+            "start_page={}\nhidden_pages={}\ncal_theme={}\ncal_font={}\ncal_hide_done={}\ncal_strike={}\ncal_weeks={}\ndata_path={}\nfirst_run_done={}\n",
             self.start_page,
             hidden.join(","),
             self.cal_theme,
@@ -46,6 +52,8 @@ impl Prefs {
             self.cal_hide_done,
             self.cal_strike,
             self.cal_weeks,
+            self.data_path.replace('\n', " "),
+            self.first_run_done,
         )
     }
     /// Unknown keys and bad values fall back to the defaults.
@@ -70,6 +78,8 @@ impl Prefs {
                 "cal_hide_done" => p.cal_hide_done = value == "true",
                 "cal_strike" => p.cal_strike = value == "true",
                 "cal_weeks" => p.cal_weeks = value.parse().unwrap_or(p.cal_weeks).min(2),
+                "data_path" => p.data_path = value.to_owned(),
+                "first_run_done" => p.first_run_done = value == "true",
                 _ => {}
             }
         }
@@ -112,6 +122,8 @@ mod tests {
             cal_hide_done: true,
             cal_strike: false,
             cal_weeks: 2,
+            data_path: "D:\\메모".into(),
+            first_run_done: true,
         };
         assert_eq!(Prefs::from_text(&p.to_text()), p);
         let q = Prefs::from_text("start_page=x\nhidden_pages=0,3\ncal_font=99\nnoise");

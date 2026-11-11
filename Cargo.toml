@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 eframe = "=0.31.1"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 global-hotkey = "0.7"
 
 arboard = "3"
@@ -13,6 +13,9 @@ rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 fontdue = "0.9"
 scraper = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_System_Threading", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Diagnostics_Debug"] }
