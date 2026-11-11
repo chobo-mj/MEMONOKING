@@ -2026,21 +2026,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "memonoking"
-version = "0.2.0"
-dependencies = [
- "arboard",
- "chrono",
- "eframe",
- "fontdue",
- "global-hotkey",
- "image",
- "rfd",
- "scraper",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "metal"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2481,6 +2466,21 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "omnimemojang"
+version = "0.2.0"
+dependencies = [
+ "arboard",
+ "chrono",
+ "eframe",
+ "fontdue",
+ "global-hotkey",
+ "image",
+ "rfd",
+ "scraper",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

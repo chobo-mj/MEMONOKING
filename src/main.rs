@@ -10,6 +10,7 @@ mod icons;
 mod media;
 mod model;
 mod native_window;
+mod prefs;
 mod refinements;
 mod repeat;
 mod schedule;
@@ -58,8 +59,9 @@ struct App {
     editor: bool,
     sticky: bool,
     cal: calendar_dock::Dock,
-    capture: bool,
-    capture_text: String,
+    /// Settings kept between runs, and the text last written to disk.
+    prefs: prefs::Prefs,
+    prefs_saved: String,
     settings: bool,
     month: NaiveDate,
     day: NaiveDate,
@@ -126,6 +128,10 @@ impl App {
         }
         cc.egui_ctx.set_fonts(fonts);
         let mut a = Self::sample(Local::now().date_naive());
+        a.prefs = prefs::Prefs::load();
+        a.prefs_saved = a.prefs.to_text();
+        a.cal.theme = a.prefs.cal_theme;
+        a.page = a.prefs.start_page;
         a.hotkeys = GlobalHotKeyManager::new().ok();
         a.apply_shortcuts();
         a
@@ -149,8 +155,8 @@ impl App {
             editor: false,
             sticky: false,
             cal: calendar_dock::Dock::default(),
-            capture: false,
-            capture_text: String::new(),
+            prefs: prefs::Prefs::default(),
+            prefs_saved: String::new(),
             settings: false,
             month: today.with_day(1).unwrap(),
             day: today,
@@ -326,9 +332,10 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         while let Ok(e) = GlobalHotKeyEvent::receiver().try_recv() {
             if e.state == HotKeyState::Pressed {
-                if self.registered.first().is_some_and(|h| h.id() == e.id) {
-                    self.capture = true;
-                } else if self.registered.get(2).is_some_and(|h| h.id() == e.id) {
+                // Quick memo and new sticker both open a new sticker memo.
+                if self.registered.first().is_some_and(|h| h.id() == e.id)
+                    || self.registered.get(2).is_some_and(|h| h.id() == e.id)
+                {
                     self.new_sticker();
                 } else if self.registered.get(1).is_some_and(|h| h.id() == e.id) {
                     self.show_calendar();
@@ -343,6 +350,7 @@ impl eframe::App for App {
                 }
             }
         }
+        self.keep_prefs();
         // The host itself paints nothing.
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -361,7 +369,7 @@ impl eframe::App for App {
 impl App {
     fn main_window(&mut self, root: &egui::Context) {
         let builder = egui::ViewportBuilder::default()
-            .with_title("MEMONOKING")
+            .with_title("OmniMemoJang")
             .with_inner_size([1440., 900.])
             .with_min_inner_size([980., 640.])
             .with_maximized(true);
@@ -479,7 +487,7 @@ impl App {
                 .iter()
                 .find(|(p, _, _)| *p == self.page)
                 .map(|(_, name, _)| *name)
-                .unwrap_or("MEMONOKING")
+                .unwrap_or("OmniMemoJang")
         };
         ui.horizontal(|ui| {
             ui.set_min_height(34.);
@@ -530,21 +538,10 @@ impl App {
     }
     fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.), egui::Sense::hover());
-            ui.painter().rect_filled(mark, 6., ACCENT);
-            ui.painter().text(
-                mark.center(),
-                egui::Align2::CENTER_CENTER,
-                "M",
-                egui::FontId::proportional(13.),
-                Color32::WHITE,
-            );
-            ui.label(RichText::new("MEMONOKING").strong().size(14.));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::icon_button(ui, icons::Icon::Sidebar, "사이드바 접기").clicked() {
-                    self.sidebar = false;
-                }
-            });
+            ui::banner(ui, Vec2::new(ui.available_width() - 32., 58.));
+            if icons::icon_button(ui, icons::Icon::Sidebar, "사이드바 접기").clicked() {
+                self.sidebar = false;
+            }
         });
         ui.add_space(12.);
         ui.horizontal(|ui| {
@@ -568,9 +565,11 @@ impl App {
             }
         });
         ui.add_space(8.);
-        if studio::nav_button(ui, "빠른 메모", false, icons::Icon::PlusCircle, None, true).clicked()
+        if studio::nav_button(ui, "빠른 메모", false, icons::Icon::PlusCircle, None, true)
+            .on_hover_text("새 스티커 메모")
+            .clicked()
         {
-            self.capture = true;
+            self.new_sticker();
         }
         ui.add_space(6.);
         let today = Local::now().date_naive();
@@ -582,6 +581,9 @@ impl App {
             .filter(|(i, n)| self.visible(*i) && n.occurs(today) && !n.done_on(Some(today)))
             .count();
         for (page, name, icon) in PAGES {
+            if self.prefs.hidden_pages.contains(&page) {
+                continue;
+            }
             let badge = (page == 2 && today_count > 0).then(|| today_count.to_string());
             if studio::nav_button(ui, name, self.page == page, icon, badge, false).clicked() {
                 self.page = page;
@@ -674,58 +676,6 @@ impl App {
     }
     /// Dialogs that belong to the application rather than to one window.
     fn global_dialogs(&mut self, ctx: &egui::Context) {
-        if self.capture {
-            self.capture_project_header();
-        }
-        let mut open = self.capture;
-        ui::dialog(
-            ctx,
-            "capture",
-            "빠른 메모",
-            [460., 300.],
-            true,
-            &mut open,
-            |ui| {
-                ui.label(RichText::new("빠른 메모").size(16.).strong());
-                ui::hint(
-                    ui,
-                    "첫 줄은 제목이 됩니다 · #프로젝트명 으로 시작하면 분류됩니다",
-                );
-                ui.add_space(8.);
-                let r = ui.add(
-                    egui::TextEdit::multiline(&mut self.capture_text)
-                        .id_salt("capture_text")
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(6)
-                        .margin(egui::Margin::same(10))
-                        .hint_text("떠오른 생각이나 할 일을 적으세요"),
-                );
-                if !r.has_focus() && self.capture_text.is_empty() {
-                    r.request_focus();
-                }
-                let submit = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-                let (save, _) = ui::dialog_buttons(ui, "추가  Ctrl+Enter", "");
-                if (save || submit) && !self.capture_text.trim().is_empty() {
-                    let i = self.data.notes.len();
-                    let mut n = Note::new(
-                        self.capture_text.lines().next().unwrap_or("새 메모"),
-                        None,
-                        i,
-                    );
-                    n.body = self
-                        .capture_text
-                        .split_once('\n')
-                        .map(|(_, rest)| rest.to_owned())
-                        .unwrap_or_default();
-                    n.project = self.extra.capture_project.take();
-                    self.data.notes.push(n);
-                    self.consume_project_header(i);
-                    self.capture_text.clear();
-                    self.toast = "메모를 추가했습니다".into();
-                }
-            },
-        );
-        self.capture = open;
         let mut open = self.settings;
         ui::dialog(
             ctx,
@@ -746,13 +696,13 @@ impl App {
             false,
             &mut open,
             |ui| {
-                ui.label(RichText::new("MEMONOKING 사용법").size(16.).strong());
+                ui.label(RichText::new("OmniMemoJang 사용법").size(16.).strong());
                 ui.add_space(8.);
                 for line in [
                     "메모 제목을 누르면 편집창이 열립니다.",
                     "메모를 달력 날짜로 끌면 일정이 지정됩니다.",
                     "스티커를 우클릭하면 바탕화면 정렬 메뉴가 나옵니다.",
-                    "접기: 스티커 → 제목 한 줄 → 색상 상자 · 상자를 두 번 클릭하면 복원",
+                    "접기: 스티커 → 제목 한 줄 → 색상 상자 · 상자를 누르면 복원",
                     "이미지와 표는 클립보드에서 본문에 붙여 넣습니다.",
                 ] {
                     ui.label(format!("·  {line}"));
@@ -771,8 +721,22 @@ impl App {
         self.studio.help = open;
     }
 }
+impl App {
+    /// Save changed settings, and leave a page whose menu was hidden.
+    fn keep_prefs(&mut self) {
+        self.prefs.cal_theme = self.cal.theme;
+        if self.prefs.hidden_pages.contains(&self.page) || !PAGES.iter().any(|p| p.0 == self.page) {
+            self.page = 0;
+        }
+        let text = self.prefs.to_text();
+        if text != self.prefs_saved {
+            self.prefs.save();
+            self.prefs_saved = text;
+        }
+    }
+}
 /// Navigation pages: (page index, label, icon) in display order.
-const PAGES: [(usize, &str, icons::Icon); 7] = [
+pub const PAGES: [(usize, &str, icons::Icon); 7] = [
     (0, "내 작업실", icons::Icon::Home),
     (2, "오늘의 할일", icons::Icon::Today),
     (3, "다음에 할일", icons::Icon::Upcoming),
@@ -798,10 +762,10 @@ fn main() -> eframe::Result {
     // minimizing the main window leaves stickers alive on the desktop and the
     // shared GL configuration supports real per-window transparency.
     eframe::run_native(
-        "MEMONOKING",
+        "OmniMemoJang",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_title("MEMONOKING")
+                .with_title("OmniMemoJang")
                 .with_inner_size([1., 1.])
                 .with_position([0., 0.])
                 .with_decorations(false)

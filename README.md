@@ -1,4 +1,6 @@
-# MEMONOKING
+# OmniMemoJang
+
+> 이전 이름: MEMONOKING. 아래의 0.2.0 UI Preview 배포 파일은 이전 이름으로 게시된 것입니다. 구조와 기능 명세는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SPEC.md](docs/SPEC.md)에 있습니다.
 
 Windows Rust + egui/eframe 개인 메모·일정 작업 공간의 **0.2.0 UI Preview**입니다. 사용자 PPT와 최신 디자인 디테일을 반영하는 화면·조작 프로토타입이며, **프로그램을 종료하면 메모와 설정이 초기화됩니다.**
 

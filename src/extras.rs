@@ -43,7 +43,6 @@ impl Picker {
 }
 pub struct Extra {
     pub media: Vec<crate::media::Asset>,
-    pub capture_project: Option<usize>,
     pub scene: egui::Rect,
     pub scene_initialized: bool,
     pub scene_size: Vec2,
@@ -108,7 +107,6 @@ impl Default for Extra {
     fn default() -> Self {
         Self {
             media: vec![],
-            capture_project: None,
             scene: egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(920., 500.)),
             scene_initialized: false,
             scene_size: Vec2::new(920., 500.),
@@ -213,59 +211,6 @@ impl App {
             && (!self.extra.image || (!n.locked && (n.has_image || n.document.has_images())))
             && (!self.extra.table || (!n.locked && (n.has_table || n.document.has_tables())))
             && (!self.extra.link || n.has_link || n.body.contains("http"))
-    }
-    pub fn consume_project_header(&mut self, i: usize) {
-        let body = self.data.notes[i].body.clone();
-        let title = self.data.notes[i].title.clone();
-        let (name, from_body) =
-            if let Some(line) = body.lines().next().filter(|l| l.starts_with('#')) {
-                if !body.contains('\n') {
-                    return;
-                }
-                (line.trim_start_matches('#').trim().to_owned(), true)
-            } else if title.starts_with('#') && title.contains('\n') {
-                (
-                    title
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .trim_start_matches('#')
-                        .trim()
-                        .to_owned(),
-                    false,
-                )
-            } else {
-                return;
-            };
-        if name.is_empty() {
-            return;
-        }
-        let p = self
-            .data
-            .projects
-            .iter()
-            .enumerate()
-            .find(|(p, s)| !self.extra.deleted_projects.contains(p) && **s == name)
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| {
-                self.data.projects.push(name.clone());
-                self.data.projects.len() - 1
-            });
-        self.data.notes[i].project = Some(p);
-        if from_body {
-            self.data.notes[i].body = body.split_once('\n').unwrap().1.into();
-            if title.starts_with('#') {
-                self.data.notes[i].title = self.data.notes[i]
-                    .body
-                    .lines()
-                    .next()
-                    .unwrap_or("새 메모")
-                    .into();
-            }
-        } else {
-            self.data.notes[i].title = title.split_once('\n').unwrap().1.into();
-        }
-        self.toast = format!("#{name} 프로젝트에 추가했습니다");
     }
     pub fn note_options(&mut self, ui: &mut egui::Ui, i: usize) {
         let color = self.data.notes[i].color;
@@ -1036,32 +981,6 @@ impl App {
         }
     }
 }
-impl App {
-    pub fn capture_project_header(&mut self) {
-        if self.capture_text.starts_with('#') {
-            if let Some((line, rest)) = self.capture_text.split_once('\n') {
-                let name = line.trim_start_matches('#').trim().to_owned();
-                let rest = rest.to_owned();
-                if !name.is_empty() {
-                    let p = self
-                        .data
-                        .projects
-                        .iter()
-                        .enumerate()
-                        .find(|(p, s)| !self.extra.deleted_projects.contains(p) && **s == name)
-                        .map(|(p, _)| p)
-                        .unwrap_or_else(|| {
-                            self.data.projects.push(name.clone());
-                            self.data.projects.len() - 1
-                        });
-                    self.extra.capture_project = Some(p);
-                    self.capture_text = rest;
-                    self.toast = format!("#{name} 프로젝트를 선택했습니다");
-                }
-            }
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1094,19 +1013,6 @@ mod tests {
         assert!(a.data.notes[0].deleted);
         assert!(a.data.notes[1].deleted);
         assert!(!a.data.notes[2].deleted);
-    }
-    #[test]
-    fn project_header_creates_one_project_and_preserves_content() {
-        let mut a = app();
-        a.capture_text = "#새 프로젝트\n본문".into();
-        a.capture_project_header();
-        let p = a.extra.capture_project.unwrap();
-        assert_eq!(a.data.projects[p], "새 프로젝트");
-        assert_eq!(a.capture_text, "본문");
-        a.capture_text = "#새 프로젝트\n두번째".into();
-        a.capture_project_header();
-        assert_eq!(a.extra.capture_project, Some(p));
-        assert_eq!(a.data.projects.len(), 3);
     }
     #[test]
     fn wiki_and_journal_comments_are_independent() {

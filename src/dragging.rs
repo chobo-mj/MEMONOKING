@@ -62,7 +62,7 @@ impl App {
                     pressed: true,
                     ..
                 } => {
-                    if !self.capture && !self.settings {
+                    if !self.settings {
                         if let Some(source) = self
                             .sources
                             .iter()

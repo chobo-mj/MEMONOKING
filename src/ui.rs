@@ -650,7 +650,7 @@ pub fn weekday(d: chrono::NaiveDate) -> &'static str {
 }
 
 pub fn main_viewport() -> ViewportId {
-    ViewportId::from_hash_of("memonoking_main")
+    ViewportId::from_hash_of("omnimemojang_main")
 }
 
 fn raise_key(vid: ViewportId) -> Id {
@@ -1038,4 +1038,109 @@ fn pick_cell(ui: &mut Ui, selected: bool, text: String) -> Response {
         if selected { Color32::WHITE } else { c.ink },
     );
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The OmniMemoJang banner: a warm gradient card with a typographic
+/// wordmark, drawn with shapes so it stays sharp at every scale.
+pub fn banner(ui: &mut Ui, size: Vec2) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    // Left-to-right gradient, coral to apricot.
+    let left = Color32::from_rgb(222, 86, 62);
+    let right = Color32::from_rgb(244, 156, 92);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), left);
+    mesh.colored_vertex(rect.right_top(), right);
+    mesh.colored_vertex(rect.right_bottom(), right);
+    mesh.colored_vertex(rect.left_bottom(), left);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    let radius = 12.;
+    // Round the corners by painting the panel color outside them.
+    painter.add(egui::Shape::mesh(mesh));
+    let bg = ui.visuals().panel_fill;
+    for (corner, center) in [
+        (rect.left_top(), rect.left_top() + Vec2::splat(radius)),
+        (
+            rect.right_top(),
+            rect.right_top() + Vec2::new(-radius, radius),
+        ),
+        (
+            rect.right_bottom(),
+            rect.right_bottom() - Vec2::splat(radius),
+        ),
+        (
+            rect.left_bottom(),
+            rect.left_bottom() + Vec2::new(radius, -radius),
+        ),
+    ] {
+        let mut points = vec![corner];
+        for k in 0..=8 {
+            let start = (corner - center).angle() - std::f32::consts::FRAC_PI_4;
+            let a = start + std::f32::consts::FRAC_PI_2 * k as f32 / 8.;
+            points.push(center + Vec2::angled(a) * radius);
+        }
+        painter.add(egui::Shape::convex_polygon(points, bg, Stroke::NONE));
+    }
+    // Decorative rings in the corner: the "O" of Omni.
+    // Kept in the corner, clear of the wordmark.
+    let ring = rect.right_top() + Vec2::new(2., -4.);
+    painter.circle_stroke(
+        ring,
+        size.y * 0.42,
+        Stroke::new(5.0_f32, Color32::from_white_alpha(26)),
+    );
+    painter.circle_stroke(
+        ring,
+        size.y * 0.2,
+        Stroke::new(3.0_f32, Color32::from_white_alpha(32)),
+    );
+    let bold = egui::FontFamily::Name("맑은 고딕 Bold".into());
+    let family = if ui.fonts(|f| f.families().contains(&bold)) {
+        bold
+    } else {
+        egui::FontFamily::Proportional
+    };
+    let wordmark = |big: f32| {
+        let mut job = egui::text::LayoutJob::default();
+        for (text, color) in [
+            ("Omni", Color32::WHITE),
+            ("Memo", Color32::from_rgb(255, 238, 222)),
+            ("Jang", Color32::from_rgb(255, 226, 160)),
+        ] {
+            job.append(
+                text,
+                0.,
+                egui::TextFormat {
+                    font_id: FontId::new(big, family.clone()),
+                    color,
+                    extra_letter_spacing: -0.3,
+                    ..Default::default()
+                },
+            );
+        }
+        ui.fonts(|f| f.layout_job(job))
+    };
+    // As large as the banner allows: the wordmark fills its width.
+    let room = size.x - 14. - size.y * 0.45;
+    let probe = wordmark(20.);
+    let big = (20. * room / probe.size().x).clamp(11., size.y * 0.36);
+    let word = wordmark(big);
+    let x = rect.left() + 14.;
+    let top = rect.top() + (size.y - word.size().y - 13.) / 2.;
+    // A soft shadow under the wordmark.
+    painter.galley_with_override_text_color(
+        egui::pos2(x + 1., top + 1.5),
+        word.clone(),
+        Color32::from_black_alpha(40),
+    );
+    painter.galley(egui::pos2(x, top), word.clone(), Color32::WHITE);
+    painter.text(
+        egui::pos2(x + 1., top + word.size().y + 1.),
+        egui::Align2::LEFT_TOP,
+        "모든 메모와 일정을 한곳에",
+        FontId::proportional(10.),
+        Color32::from_white_alpha(215),
+    );
+    response
 }

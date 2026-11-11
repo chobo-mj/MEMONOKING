@@ -11,5 +11,5 @@ jobs:
       - run: cargo build --release --locked
       - uses: actions/upload-artifact@v4
         with:
-          name: MEMONOKING-Windows
-          path: target/release/memonoking.exe
+          name: OmniMemoJang-Windows
+          path: target/release/omnimemojang.exe

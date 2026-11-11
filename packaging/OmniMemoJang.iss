@@ -7,7 +7,7 @@
   #define ReleaseLabel "0.2.0-ui-preview.2"
 #endif
 #ifndef StageDir
-  #define StageDir "..\dist\portable\MEMONOKING"
+  #define StageDir "..\dist\portable\OmniMemoJang"
 #endif
 #ifndef PackageOutputDir
   #define PackageOutputDir "..\dist"
@@ -15,29 +15,29 @@
 
 [Setup]
 AppId={{36497726-D8EF-4514-9BF2-51367779F831}
-AppName=MEMONOKING UI Preview
+AppName=OmniMemoJang UI Preview
 AppVersion={#AppVersion}
-AppVerName=MEMONOKING {#ReleaseLabel}
-AppPublisher=MEMONOKING
-DefaultDirName={localappdata}\Programs\MEMONOKING
-DefaultGroupName=MEMONOKING
+AppVerName=OmniMemoJang {#ReleaseLabel}
+AppPublisher=OmniMemoJang
+DefaultDirName={localappdata}\Programs\OmniMemoJang
+DefaultGroupName=OmniMemoJang
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#PackageOutputDir}
-OutputBaseFilename=MEMONOKING-{#ReleaseLabel}-Windows-x64-Setup
+OutputBaseFilename=OmniMemoJang-{#ReleaseLabel}-Windows-x64-Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\MEMONOKING.exe
-UninstallDisplayName=MEMONOKING UI Preview
+UninstallDisplayIcon={app}\OmniMemoJang.exe
+UninstallDisplayName=OmniMemoJang UI Preview
 VersionInfoVersion={#AppVersion}
 InfoBeforeFile={#StageDir}\README.txt
 CloseApplications=yes
 RestartApplications=no
-SetupMutex=MEMONOKINGPreviewInstaller
+SetupMutex=OmniMemoJangPreviewInstaller
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
@@ -47,13 +47,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "바탕화면 바로가기 만들기"; GroupDescription: "바로가기:"; Flags: unchecked
 
 [Files]
-Source: "{#StageDir}\MEMONOKING.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\OmniMemoJang.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\MEMONOKING\MEMONOKING"; Filename: "{app}\MEMONOKING.exe"; WorkingDir: "{app}"
-Name: "{userdesktop}\MEMONOKING"; Filename: "{app}\MEMONOKING.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userprograms}\OmniMemoJang\OmniMemoJang"; Filename: "{app}\OmniMemoJang.exe"; WorkingDir: "{app}"
+Name: "{userdesktop}\OmniMemoJang"; Filename: "{app}\OmniMemoJang.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 ; No [Run], [Registry], download, startup, firewall, or security-policy actions.
 ; Inno Setup manages the current user's uninstall registration automatically.

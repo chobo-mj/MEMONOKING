@@ -450,11 +450,27 @@ impl App {
                     .strong(),
             );
             ui.add_space(4.);
-            if icons::icon_button(ui, icons::Icon::ChevronLeft, "이전 달").clicked() {
-                self.month = (self.month - Duration::days(1)).with_day(1).unwrap();
+            let weeks = self.prefs.cal_weeks;
+            let (back, forward) = if weeks == 0 {
+                ("이전 달", "다음 달")
+            } else {
+                ("이전 주", "다음 주")
+            };
+            if icons::icon_button(ui, icons::Icon::ChevronLeft, back).clicked() {
+                if weeks == 0 {
+                    self.month = (self.month - Duration::days(1)).with_day(1).unwrap();
+                } else {
+                    self.day -= Duration::days(7 * weeks as i64);
+                    self.month = self.day.with_day(1).unwrap();
+                }
             }
-            if icons::icon_button(ui, icons::Icon::ChevronRight, "다음 달").clicked() {
-                self.month = (self.month + Duration::days(32)).with_day(1).unwrap();
+            if icons::icon_button(ui, icons::Icon::ChevronRight, forward).clicked() {
+                if weeks == 0 {
+                    self.month = (self.month + Duration::days(32)).with_day(1).unwrap();
+                } else {
+                    self.day += Duration::days(7 * weeks as i64);
+                    self.month = self.day.with_day(1).unwrap();
+                }
             }
             if ui.button("오늘").clicked() {
                 self.month = today.with_day(1).unwrap();
@@ -466,6 +482,11 @@ impl App {
                     &mut self.desktop.calendar_basis,
                     &["작성일", "일정", "알람"],
                 );
+                // Will open the linked Excel file of who is on duty; not
+                // connected yet.
+                let _ = ui
+                    .button("근무자 보기")
+                    .on_hover_text("연결된 엑셀 파일의 근무자 보기 · 준비 중");
             });
         });
         ui.add_space(10.);
@@ -488,10 +509,27 @@ impl App {
                 },
             );
         }
-        let offset = self.month.weekday().num_days_from_sunday() as usize;
-        let next = (self.month + Duration::days(32)).with_day(1).unwrap();
-        let rows = ((next - self.month).num_days() as usize + offset).div_ceil(7);
-        let height = if width < 580. { 104. } else { 122. };
+        let weeks = self.prefs.cal_weeks;
+        // Month view starts on the Sunday before the 1st; week views on the
+        // Sunday of the selected day's week.
+        let (first, rows) = if weeks == 0 {
+            let offset = self.month.weekday().num_days_from_sunday() as i64;
+            let next = (self.month + Duration::days(32)).with_day(1).unwrap();
+            let days = (next - self.month).num_days() + offset;
+            (
+                self.month - Duration::days(offset),
+                (days as usize).div_ceil(7),
+            )
+        } else {
+            let offset = self.day.weekday().num_days_from_sunday() as i64;
+            (self.day - Duration::days(offset), weeks)
+        };
+        let height = match (weeks, width < 580.) {
+            (1, _) => 300.,
+            (2, _) => 220.,
+            (_, true) => 104.,
+            _ => 122.,
+        };
         let (all, _) =
             ui.allocate_exact_size(Vec2::new(width, rows as f32 * height), Sense::hover());
         if let Some(theme) = self.cal.active() {
@@ -522,9 +560,9 @@ impl App {
                 all.min + Vec2::new((slot % 7) as f32 * col, (slot / 7) as f32 * height),
                 Vec2::new(col, height),
             );
-            let day = self.month + Duration::days(slot as i64 - offset as i64);
+            let day = first + Duration::days(slot as i64);
             let weekday = day.weekday().num_days_from_sunday();
-            if day.month() != self.month.month() {
+            if weeks == 0 && day.month() != self.month.month() {
                 ui.painter().text(
                     rect.min + Vec2::new(10., 10.),
                     egui::Align2::LEFT_TOP,
@@ -598,7 +636,7 @@ impl App {
                 });
             }
         }
-        self.calendar_bands(ui, all, rows, offset, col, height);
+        self.calendar_bands(ui, all, first, rows, col, height);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
@@ -641,22 +679,26 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         all: Rect,
+        first: NaiveDate,
         rows: usize,
-        offset: usize,
         col: f32,
         height: f32,
     ) {
         let (tone, ..) = self.calendar_tone(ui);
         let month = self.month.month();
-        let capacity = (((height - 36.) / 22.).floor() as usize).max(1);
+        let whole_weeks = self.prefs.cal_weeks > 0;
+        let hide_done = self.prefs.cal_hide_done;
+        let band = (self.prefs.cal_font + 8.5).round();
+        let step = band + 2.;
+        let capacity = (((height - 36.) / step).floor() as usize).max(1);
         for row in 0..rows {
-            let start = self.month + Duration::days((row * 7) as i64 - offset as i64);
+            let start = first + Duration::days((row * 7) as i64);
             let days: Vec<NaiveDate> = (0..7).map(|c| start + Duration::days(c)).collect();
-            let shown_day = |c: usize| days[c].month() == month;
+            let shown_day = |c: usize| whole_weeks || days[c].month() == month;
             let mut segments = band_segments(
                 &self.data.notes,
                 |i| self.visible(i),
-                |n, d| self.calendar_matches(n, d),
+                |n, d| self.calendar_matches(n, d) && !(hide_done && n.done_on(Some(d))),
                 &days,
                 shown_day,
             );
@@ -696,11 +738,11 @@ impl App {
                     let rect = Rect::from_min_max(
                         egui::pos2(
                             all.left() + from as f32 * col + if open_left { 5. } else { 0. },
-                            row_top + 33. + lane as f32 * 22.,
+                            row_top + 33. + lane as f32 * step,
                         ),
                         egui::pos2(
                             all.left() + (c + 1) as f32 * col - if open_right { 5. } else { 0. },
-                            row_top + 33. + lane as f32 * 22. + 20.,
+                            row_top + 33. + lane as f32 * step + band,
                         ),
                     );
                     self.calendar_band(
@@ -721,7 +763,7 @@ impl App {
                     ui.painter().text(
                         egui::pos2(
                             all.left() + c as f32 * col + 9.,
-                            row_top + 33. + shown as f32 * 22. + 10.,
+                            row_top + 33. + shown as f32 * step + band / 2.,
                         ),
                         egui::Align2::LEFT_CENTER,
                         format!("+{}개 더보기", n - shown),
@@ -781,7 +823,7 @@ impl App {
         let mut job = egui::text::LayoutJob::single_section(
             label,
             egui::TextFormat {
-                font_id: egui::FontId::proportional(11.5),
+                font_id: egui::FontId::proportional(self.prefs.cal_font),
                 color: if done {
                     tone.faint
                 } else if self.dark {
@@ -789,7 +831,7 @@ impl App {
                 } else {
                     INK
                 },
-                strikethrough: if done {
+                strikethrough: if done && self.prefs.cal_strike {
                     Stroke::new(1.0_f32, tone.faint)
                 } else {
                     Stroke::NONE

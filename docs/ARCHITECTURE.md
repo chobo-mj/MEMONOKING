@@ -1,0 +1,128 @@
+# OmniMemoJang 코드 아키텍처
+
+OmniMemoJang(이전 이름 MEMONOKING)은 Windows용 개인 메모·일정 작업 공간이다. 이 문서는 지금 코드가 어떻게 짜여 있는지와, 최종판을 완성하려면 무엇을 더 붙여야 하는지를 정리한다. 기능 요구사항은 [SPEC.md](SPEC.md)에 있다.
+
+## 1. 기술 스택
+
+| 항목 | 선택 | 이유 |
+|---|---|---|
+| 언어 | Rust 2021 | 단일 실행 파일, 런타임 설치 불필요 |
+| UI | eframe / egui 0.31.1 (glow 백엔드) | 즉시 모드 UI. 메모 창마다 OS 창(viewport)을 쓴다 |
+| 창 시스템 | winit 0.30 (eframe 내장) | 여러 OS 창 관리 |
+| Windows API | windows-sys 0.59 | 창 모양·투명도, 바탕화면 고정, 모니터 정보, 마우스 훅 |
+| 날짜 | chrono | 일정·반복·완료 시각 |
+| 기타 | global-hotkey, arboard, rfd, image, fontdue, scraper | 전역 단축키, 클립보드, 파일 대화상자, 이미지, 표 이미지화, 링크 미리보기 |
+
+빌드는 `cargo build --release`이며 결과물은 `omnimemojang.exe` 하나다. 배포 구성은 `packaging/OmniMemoJang.iss`(Inno Setup)와 `.github/workflows/release.yml`이다.
+
+## 2. 창 구조
+
+```
+루트 호스트 (1×1 투명, 보이지 않음)
+├─ 메인 창            main_window()        메뉴창 + 각 페이지
+├─ 스티커 메모 창 N개  studio::stickers()   메모 하나당 OS 창 하나 (스티커/편집/제목/색상상자)
+│   └─ 메뉴 창         studio::menu_window  더보기·우클릭·프로젝트·연결 메모 팝업 (+ 하위 메뉴 창)
+├─ 캘린더 분리창       calendar_dock        또는 캘린더 상자 / 스탠딩 캘린더
+├─ 대화상자 창들       ui::dialog           설정, 알람, 일정, 잠금, 찾아바꾸기, 완료 범위 …
+└─ 모니터 선택 창      studio::monitor_picker
+```
+
+- **루트 호스트:** 모든 창은 egui의 *immediate viewport*이고, 보이지 않는 루트가 이들을 거느린다. 그래서 메인 창을 최소화해도 스티커는 바탕화면에 그대로 남는다.
+- **창 모양:** 대부분의 GPU에서 OpenGL 창은 픽셀 단위 투명을 지원하지 않는다. 그래서 테두리 없는 창은 불투명한 사각형으로 그리고 둥근 모서리(DWM)와 창 전체 투명도(레이어드 창)는 Windows가 맡는다. 이 처리는 `win_style.rs`에 있다. winit이 창 스타일을 다시 쓰면 레이어드 속성이 사라지므로 매 프레임 확인해 다시 적용한다.
+- **창 이동·크기:** 이동과 크기 조절은 OS에 맡긴다. 앱은 결과를 관찰만 하고, 크기·위치 요청을 매 프레임 되먹이지 않는다. 이 처리는 `native_window.rs`에 있다.
+- **반복 갱신:** 루트가 100ms마다 다시 그려, 매일 메모 05:00 전환·알람·스탠딩 캘린더 같은 시간 기반 동작을 처리한다.
+
+## 3. 모듈 구성 (src/)
+
+| 모듈 | 책임 |
+|---|---|
+| `main.rs` | `App` 상태, 시작(글꼴·설정 불러오기·단축키), 프레임 순서, 메뉴창(사이드바)·페이지 전환, 전역 대화상자 |
+| `model.rs` | `Note`, `Workspace`. 일정·기간·반복 발생(`occurs`), 날짜별 완료, 연결(parents) DAG |
+| `repeat.rs` | 반복 규칙(매주·격주·매월 n째 주 …)과 설명 문자열 |
+| `prefs.rs` | 재시작 후에도 남는 설정(첫 화면, 숨긴 메뉴, 캘린더 옵션)의 저장·불러오기 |
+| `ui.rs` | 색·톤(`Tone`), 공용 위젯(pill, segmented, toggle_row, 검색창, 시간 입력·달력), 대화상자 창, 배너 |
+| `icons.rs` | 벡터 아이콘 그리기와 아이콘 버튼 |
+| `studio.rs` | 스티커 창: 모드(스티커/편집/제목/색상상자), 머리·바닥 도구, 메뉴 창, 정렬(arrange), 매일 메모, 모니터 선택 |
+| `composer.rs` | 메모 본문 편집기: 탭, 서식, 표, 그림, 도구막대 |
+| `schedule.rs` | 일정 대화상자(시작·끝·반복) |
+| `views.rs` | 내 작업실·오늘/다음 할 일 목록, 할 일 행, 캘린더(월/1주/2주, 연속 일정 색띠), 메모 편집 보조 |
+| `calendar_dock.rs` | 캘린더 분리창, 캘린더 상자, 스탠딩 캘린더, 캘린더 테마 |
+| `catalog.rs` | 전체메모 목록·폴더, 휴지통, 찾아 바꾸기 |
+| `refinements.rs` | 기간 일정 완료 범위, 나만의 위키(탭·트리·미분류·두 영역), 프로젝트 필터 도우미 |
+| `extras.rs` | 부가 상태(`Extra`), 댓글, 일지, 날짜 선택기, 프로젝트 관리, 편의기능 |
+| `desktop.rs` | 설정 화면, 앱 안 미리보기 편집(`inline_note`), 잠금·알람 대화상자, 휴지통 이동 |
+| `dragging.rs` | 창을 넘나드는 메모 끌어놓기(날짜·연결·위키 분류) |
+| `media.rs`, `content_collections.rs` | 이미지·표·링크 모음, 내보내기 |
+| `native_window.rs` | 창 이동·크기 관찰, 작업 영역·모니터 목록 |
+| `win_style.rs` | 창 모양·투명도, HWND 찾기, 바탕화면(WorkerW) 고정, 저수준 마우스 훅 |
+
+## 4. 데이터 모델
+
+```
+App
+├─ data: Workspace
+│   ├─ notes: Vec<Note>      (인덱스가 곧 메모 ID. 지울 때는 deleted 표시만 한다)
+│   ├─ projects: Vec<String>
+│   └─ links: Vec<(usize, usize)>
+├─ desktop: Desktop          설정 값 (현재 대부분 메모리에만 있음)
+├─ prefs: Prefs              디스크에 저장되는 설정
+├─ extra: Extra              위키 폴더·탭·영역, 필터, 댓글 초안 …
+├─ catalog: Catalog          전체메모 폴더·선택·찾아바꾸기 상태
+├─ studio: Studio            열린 스티커 창들(Window: 모드·크기·메뉴)
+└─ cal: Dock                 캘린더 분리창·상자·스탠딩·테마
+```
+
+`Note`의 주요 필드:
+
+| 필드 | 뜻 |
+|---|---|
+| `title`, `body`, `document` | 제목, 본문, 서식 문서(탭·표·그림) |
+| `date`, `duration`, `time`, `end_time`, `repeat` | 일정 |
+| `done` / `completed` | 하루짜리 일정의 완료 |
+| `occurrence_completed` | 기간 일정의 날짜별 완료 |
+| `reminder` | 알람 |
+| `project` | 프로젝트 |
+| `parents` | 연결 메모 |
+| `starred`, `locked`, `color` | 중요, 잠금, 색 |
+| `wiki`, `wiki_tab`, `folder`, `wiki_comments` | 위키 속성·분류·댓글 |
+| `deleted`, `purged` | 휴지통 |
+
+## 5. 프레임 흐름
+
+`eframe::App::update`가 매 프레임 아래 순서로 실행된다.
+
+1. **설정 처리:** 테마를 적용하고 전역 단축키를 처리한다. `keep_prefs()`로 바뀐 설정을 저장하고, 숨긴 메뉴가 현재 페이지면 내 작업실로 돌아간다.
+2. **창 그리기:** 메인 창(`main_window`)을 그린 다음 캘린더 분리창·상자(`calendar_dock`)를 그린다.
+3. **자동 동작:** `daily_today`(05:00 기준 오늘 메모 띄우기), `monitor_picker`, `apply_arrangement`(스티커 자동 정렬)를 차례로 실행한다.
+4. **나머지 창:** 스티커와 기타 창, 전역·설정 대화상자를 그린다.
+
+창 사이 끌어놓기는 각 창이 그릴 때 `sources`와 `targets`를 등록하고, `drag_input`이 포인터 사건으로 놓을 곳을 결정하는 방식이다.
+
+## 6. 최종판을 위해 더 만들어야 하는 부분
+
+| 영역 | 현재 | 최종 구조 제안 |
+|---|---|---|
+| 데이터 저장 | 메모·프로젝트·위키는 메모리에만 있다. 끄면 초기화되고, `prefs`만 저장된다 | `storage` 모듈 신설. `%APPDATA%\OmniMemoJang\data\`에 JSON 또는 SQLite로 저장한다. 메모 ID는 인덱스 대신 고정 UUID나 증가 정수로 바꾸고, 변경 시 디바운스 저장(1초)과 종료 시 저장을 한다. 이미지는 `media\` 폴더에 둔다 |
+| 백업/복원 | 화면만 있다 | `storage`에서 zip 스냅샷을 만들고 복원 시 검증한다. 자동 백업 주기를 둔다 |
+| 알람 | 대화상자만 있다 | `notify` 모듈. 앱 타이머로 시각을 확인하고 Windows 알림(토스트)을 띄운다. 놓친 알람은 시작 시 모아서 보여 준다 |
+| 트레이·자동 실행 | 설정 토글만 있다 | 트레이 아이콘(tray-icon 크레이트)과 레지스트리 Run 키 |
+| 잠금 메모 | 화면 잠금 미리보기 | 비밀번호 해시(argon2)와 본문 암호화 저장 |
+| 근무자 보기 | 빈 버튼(`views.rs`, 캘린더 머리줄) | `duty` 모듈. 연결한 엑셀 파일(calamine으로 읽기)을 날짜별 근무자로 읽어 캘린더 칸에 표시한다. 파일 경로는 `prefs`에 둔다 |
+| 설정 저장 | `prefs.rs`(7개 항목) | `Desktop`의 사용자 설정 전체를 `prefs`로 옮긴다 |
+| 큰 모듈 정리 | `catalog.rs`, `composer.rs`가 2,800줄 | 기능 단위로 쪼갠다. 예: composer → 표·그림·서식 하위 모듈 |
+
+**저장 계층의 경계:** UI 모듈은 `App` 상태만 바꾸고 디스크를 직접 만지지 않는다. `storage`만 디스크를 다루고, `update` 끝에서 변경 여부(세대 번호)를 보고 저장한다.
+
+## 7. 플랫폼 연동 지점 (Windows)
+
+- **창 모양:** HWND를 창 제목과 화면 위치로 찾는다(`win_style::find`). egui가 보조 창의 핸들을 주지 않기 때문이다.
+- **스탠딩 캘린더:** Progman에 0x052C 메시지를 보내 WorkerW를 만들고, 캘린더 창을 그 자식으로 붙인다. Windows 11 24H2에서는 Progman의 자식 WorkerW를 쓴다. 바탕화면 아이콘이 위에 오므로 캘린더는 입력을 받지 못한다. 그래서 해제 클릭은 저수준 마우스 훅(`WH_MOUSE_LL`)을 전용 스레드에서 돌려 감지한다.
+- **모니터 목록:** `EnumDisplayMonitors`로 얻는다.
+- **좌표 단위:** 화면 좌표는 물리 픽셀로 다룬다. egui 포인트에 `native_pixels_per_point`를 곱해 바꾼다.
+
+## 8. 테스트와 검증
+
+- **단위 테스트(`cargo test`, 103개):** 일정·반복·완료 범위, 끌어놓기, 찾아 바꾸기, 위키 영역 규칙, 연속 일정 배치, 매일 메모 05:00 경계, 설정 저장 왕복을 다룬다.
+- **정적 검사:** Linux에서 `cargo clippy --target x86_64-pc-windows-msvc`로 Windows 전용 코드까지 검사한다.
+- **수동 검증:** 실제 Windows PC에서 확인하고 결과를 `docs/WORKLOG-*.md`에 남긴다. 화면 확인은 Xvfb 스크린샷을 쓴다.
+- **테스트 시계:** `OMNIMEMOJANG_TEST_NOW="YYYY-MM-DD HH:MM:SS"`로 매일 메모의 시계를 지정할 수 있다.

@@ -64,7 +64,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $sourceCommit -ne $tagCommit) { throw 'The checkout does not match the tagged commit.' }
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed.' }
-          $package = @($metadata.packages | Where-Object name -eq 'memonoking')
+          $package = @($metadata.packages | Where-Object name -eq 'omnimemojang')
           if ($package.Count -ne 1 -or $package[0].version -ne $tagVersion) {
             throw "Cargo version must match tag version $tagVersion."
           }
@@ -88,7 +88,7 @@ jobs:
       - name: Check offline executable dependencies
         run: |
           $ErrorActionPreference = 'Stop'
-          $executable = Join-Path $PWD "target/$env:TARGET/release/memonoking.exe"
+          $executable = Join-Path $PWD "target/$env:TARGET/release/omnimemojang.exe"
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
           $dumpbins = @(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe')
           if ($LASTEXITCODE -ne 0 -or $dumpbins.Count -eq 0) { throw 'Cannot locate dumpbin to verify offline runtime dependencies.' }
@@ -102,22 +102,22 @@ jobs:
       - name: Stage allowlisted portable package
         run: |
           $ErrorActionPreference = 'Stop'
-          $stage = Join-Path $PWD 'dist/portable/MEMONOKING'
+          $stage = Join-Path $PWD 'dist/portable/OmniMemoJang'
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -LiteralPath "target/$env:TARGET/release/memonoking.exe" -Destination (Join-Path $stage 'MEMONOKING.exe')
+          Copy-Item -LiteralPath "target/$env:TARGET/release/omnimemojang.exe" -Destination (Join-Path $stage 'OmniMemoJang.exe')
           $readme = (Get-Content -LiteralPath 'packaging/README.md' -Raw -Encoding utf8).Split('## 개발자용 패키징')[0].TrimEnd()
           $readme.Replace('0.2.0-ui-preview.2', $env:RELEASE_LABEL) | Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding utf8
-          $hashes = @('MEMONOKING.exe', 'README.txt') | ForEach-Object {
+          $hashes = @('OmniMemoJang.exe', 'README.txt') | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $stage $_)).Hash.ToLowerInvariant()
             "$hash  $_"
           }
           $hashes | Set-Content -LiteralPath (Join-Path $stage 'SHA256SUMS.txt') -Encoding ascii
-          $allowed = @('MEMONOKING.exe', 'README.txt', 'SHA256SUMS.txt')
+          $allowed = @('OmniMemoJang.exe', 'README.txt', 'SHA256SUMS.txt')
           $actual = @(Get-ChildItem -LiteralPath $stage -File | Select-Object -ExpandProperty Name)
           if (@(Compare-Object $allowed $actual).Count -ne 0 -or @(Get-ChildItem -LiteralPath $stage -Directory).Count -ne 0) {
             throw 'Portable package contains an unexpected file or directory.'
           }
-          $zip = Join-Path $PWD "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Portable.zip"
+          $zip = Join-Path $PWD "dist/OmniMemoJang-$env:RELEASE_LABEL-Windows-x64-Portable.zip"
           Compress-Archive -LiteralPath $stage -DestinationPath $zip -CompressionLevel Optimal
 
       - name: Locate or install Inno Setup compiler
@@ -150,7 +150,7 @@ jobs:
             # the loaded engine's real version, without creating an installer.
             # Official source: jrsoftware/issrc, is-6_7_1/Projects/ISCC.dpr,
             # ShowBanner and Go's 'Compiler engine version:' status line.
-            $probe = "[Setup]`nAppName=MEMONOKING Compiler Probe`nAppVersion=0.0.0`nDefaultDirName={tmp}\MEMONOKING-CompilerProbe`nOutput=no`nUninstallable=no`n"
+            $probe = "[Setup]`nAppName=OmniMemoJang Compiler Probe`nAppVersion=0.0.0`nDefaultDirName={tmp}\OmniMemoJang-CompilerProbe`nOutput=no`nUninstallable=no`n"
             $result = Invoke-InnoCommand -Path $Path -Arguments @('/O-', '-') -InputText $probe
             $version = Read-InnoEngineVersion -Output $result.Output
             if ($result.ExitCode -ne 0 -or $null -eq $version -or $version -lt [version]'6.3.0') {
@@ -197,40 +197,40 @@ jobs:
       - name: Build per-user offline installer
         run: |
           $ErrorActionPreference = 'Stop'
-          $stage = Join-Path $PWD 'dist/portable/MEMONOKING'
+          $stage = Join-Path $PWD 'dist/portable/OmniMemoJang'
           $output = Join-Path $PWD 'dist'
-          & $env:ISCC_PATH "/DAppVersion=$env:APP_VERSION" "/DReleaseLabel=$env:RELEASE_LABEL" "/DStageDir=$stage" "/DPackageOutputDir=$output" 'packaging/MEMONOKING.iss'
+          & $env:ISCC_PATH "/DAppVersion=$env:APP_VERSION" "/DReleaseLabel=$env:RELEASE_LABEL" "/DStageDir=$stage" "/DPackageOutputDir=$output" 'packaging/OmniMemoJang.iss'
           if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
 
       - name: Smoke-test installation, shortcuts, payload, and removal
         run: |
           $ErrorActionPreference = 'Stop'
-          $installer = Join-Path $PWD "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Setup.exe"
-          $appDir = Join-Path $env:LOCALAPPDATA 'Programs/MEMONOKING'
+          $installer = Join-Path $PWD "dist/OmniMemoJang-$env:RELEASE_LABEL-Windows-x64-Setup.exe"
+          $appDir = Join-Path $env:LOCALAPPDATA 'Programs/OmniMemoJang'
           $install = Start-Process -FilePath $installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-' -WindowStyle Hidden -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Installer smoke test failed: $($install.ExitCode)." }
-          foreach ($file in @('MEMONOKING.exe', 'README.txt', 'SHA256SUMS.txt', 'unins000.exe')) {
+          foreach ($file in @('OmniMemoJang.exe', 'README.txt', 'SHA256SUMS.txt', 'unins000.exe')) {
             if (-not (Test-Path -LiteralPath (Join-Path $appDir $file))) { throw "Installed file is missing: $file" }
           }
-          $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appDir 'MEMONOKING.exe')).Hash
-          $stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/portable/MEMONOKING/MEMONOKING.exe').Hash
+          $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $appDir 'OmniMemoJang.exe')).Hash
+          $stagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath 'dist/portable/OmniMemoJang/OmniMemoJang.exe').Hash
           if ($installedHash -ne $stagedHash) { throw 'Installed executable differs from the staged executable.' }
-          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'MEMONOKING/MEMONOKING.lnk'
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'OmniMemoJang/OmniMemoJang.lnk'
           if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Start menu shortcut is missing.' }
-          $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'MEMONOKING.lnk'
+          $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'OmniMemoJang.lnk'
           if (Test-Path -LiteralPath $desktopShortcut) { throw 'The optional desktop shortcut must be off by default.' }
           $remove = Start-Process -FilePath (Join-Path $appDir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -WindowStyle Hidden -Wait -PassThru
           if ($remove.ExitCode -ne 0) { throw "Uninstall smoke test failed: $($remove.ExitCode)." }
-          for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath (Join-Path $appDir 'MEMONOKING.exe')); $attempt++) { Start-Sleep -Milliseconds 250 }
-          if (Test-Path -LiteralPath (Join-Path $appDir 'MEMONOKING.exe')) { throw 'Uninstall left the executable behind.' }
+          for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath (Join-Path $appDir 'OmniMemoJang.exe')); $attempt++) { Start-Sleep -Milliseconds 250 }
+          if (Test-Path -LiteralPath (Join-Path $appDir 'OmniMemoJang.exe')) { throw 'Uninstall left the executable behind.' }
           if (Test-Path -LiteralPath $shortcut) { throw 'Uninstall left the Start menu shortcut behind.' }
 
       - name: Write release checksums and notes
         run: |
           $ErrorActionPreference = 'Stop'
           $assets = @(
-            "MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Setup.exe",
-            "MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Portable.zip"
+            "OmniMemoJang-$env:RELEASE_LABEL-Windows-x64-Setup.exe",
+            "OmniMemoJang-$env:RELEASE_LABEL-Windows-x64-Portable.zip"
           )
           $hashes = $assets | ForEach-Object {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path 'dist' $_)).Hash.ToLowerInvariant()
@@ -238,12 +238,12 @@ jobs:
           }
           $hashes | Set-Content -LiteralPath 'dist/SHA256SUMS.txt' -Encoding ascii
           @"
-          # MEMONOKING $env:RELEASE_LABEL
+          # OmniMemoJang $env:RELEASE_LABEL
 
           Windows 10/11 x64 화면·조작 시험용 사전 배포입니다.
 
           - Setup.exe: 관리자 권한 없이 현재 사용자에게 설치, 시작 메뉴 바로가기와 제거 지원.
-          - Portable.zip: 압축을 푼 뒤 MEMONOKING.exe 실행. Rust나 빌드 도구 설치 불필요.
+          - Portable.zip: 압축을 푼 뒤 OmniMemoJang.exe 실행. Rust나 빌드 도구 설치 불필요.
           - SHA256SUMS.txt: 설치파일과 ZIP의 SHA-256 대조용.
           - 실행에는 인터넷이나 별도 Visual C++ 런타임 다운로드가 필요하지 않습니다.
 
@@ -256,7 +256,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MEMONOKING-${{ env.RELEASE_LABEL }}-Windows-x64
+          name: OmniMemoJang-${{ env.RELEASE_LABEL }}-Windows-x64
           if-no-files-found: error
           path: |
             dist/*-Setup.exe
@@ -270,8 +270,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $assets = @(
-            "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Setup.exe",
-            "dist/MEMONOKING-$env:RELEASE_LABEL-Windows-x64-Portable.zip",
+            "dist/OmniMemoJang-$env:RELEASE_LABEL-Windows-x64-Setup.exe",
+            "dist/OmniMemoJang-$env:RELEASE_LABEL-Windows-x64-Portable.zip",
             'dist/SHA256SUMS.txt'
           )
           $existingJson = gh release view $env:RELEASE_TAG --json isPrerelease
@@ -280,6 +280,6 @@ jobs:
             if (-not $existing.isPrerelease) { throw 'Refusing to overwrite a non-prerelease release.' }
             gh release upload $env:RELEASE_TAG @assets --clobber
           } else {
-            gh release create $env:RELEASE_TAG @assets --verify-tag --prerelease --latest=false --title "MEMONOKING $env:RELEASE_LABEL" --notes-file 'dist/RELEASE_NOTES.md'
+            gh release create $env:RELEASE_TAG @assets --verify-tag --prerelease --latest=false --title "OmniMemoJang $env:RELEASE_LABEL" --notes-file 'dist/RELEASE_NOTES.md'
           }
           if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publication failed.' }

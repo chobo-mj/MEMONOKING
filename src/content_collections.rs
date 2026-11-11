@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn batch_image_export_never_overwrites_an_existing_file() {
         let folder = std::env::temp_dir().join(format!(
-            "memonoking-gallery-{}-{}",
+            "omnimemojang-gallery-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

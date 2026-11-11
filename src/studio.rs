@@ -676,14 +676,14 @@ impl App {
 fn daily_day(now: chrono::NaiveDateTime) -> NaiveDate {
     (now - chrono::Duration::hours(5)).date()
 }
-/// Local time for the daily memos. `MEMONOKING_TEST_NOW`
+/// Local time for the daily memos. `OMNIMEMOJANG_TEST_NOW`
 /// (`YYYY-MM-DD HH:MM:SS`) starts a test clock at that time instead of the
 /// system clock, so the 05:00 rollover can be tried without changing Windows.
 fn daily_now() -> chrono::NaiveDateTime {
     static START: std::sync::OnceLock<Option<(chrono::NaiveDateTime, std::time::Instant)>> =
         std::sync::OnceLock::new();
     let start = START.get_or_init(|| {
-        let text = std::env::var("MEMONOKING_TEST_NOW").ok()?;
+        let text = std::env::var("OMNIMEMOJANG_TEST_NOW").ok()?;
         let at = chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S").ok()?;
         Some((at, std::time::Instant::now()))
     });

@@ -174,7 +174,7 @@ impl App {
     fn calendar_window(&mut self, ctx: &egui::Context) {
         let standing = self.cal.standing.is_some();
         let mut builder = egui::ViewportBuilder::default()
-            .with_title("MEMONOKING · 캘린더")
+            .with_title("OmniMemoJang · 캘린더")
             .with_inner_size([860., 760.])
             .with_min_inner_size([480., 420.])
             .with_decorations(!standing);
@@ -363,7 +363,7 @@ impl App {
     fn calendar_box(&mut self, ctx: &egui::Context) {
         let size = Vec2::splat(self.cal.box_size);
         let builder = egui::ViewportBuilder::default()
-            .with_title("MEMONOKING · 캘린더 상자")
+            .with_title("OmniMemoJang · 캘린더 상자")
             .with_position(self.cal.box_spawn)
             .with_inner_size(size)
             .with_decorations(false)

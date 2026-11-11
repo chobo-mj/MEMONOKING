@@ -251,7 +251,7 @@ impl App {
                         }
                         if let Some(bytes) = m.displayed() {
                             let path = dir.join(format!(
-                                "memonoking-image-{}-{}.png",
+                                "omnimemojang-image-{}-{}.png",
                                 i + 1,
                                 Local::now().format("%Y%m%d-%H%M%S")
                             ));
@@ -414,7 +414,7 @@ mod filesystem_tests {
     #[test]
     fn batch_output_never_overwrites_existing_file() {
         let p = std::env::temp_dir().join(format!(
-            "memonoking-test-{}-{}.tmp",
+            "omnimemojang-test-{}-{}.tmp",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -622,7 +622,7 @@ mod thumbnail_tests {
         let mut a = App::sample(Local::now().date_naive());
         a.extra.media = vec![sample_asset(0)];
         let p = std::env::temp_dir().join(format!(
-            "memonoking-archive-{}-{}.png",
+            "omnimemojang-archive-{}-{}.png",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

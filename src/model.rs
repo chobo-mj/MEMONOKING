@@ -212,7 +212,7 @@ impl Workspace {
         notes[5].recurring = true;
         Self {
             notes,
-            projects: vec!["MEMONOKING".into(), "개인 업무".into()],
+            projects: vec!["OmniMemoJang".into(), "개인 업무".into()],
             links: vec![(0, 1)],
         }
     }

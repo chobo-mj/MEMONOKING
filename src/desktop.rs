@@ -715,6 +715,7 @@ impl App {
             "일반",
             "메인창",
             "메모창",
+            "캘린더",
             "알람",
             "단축키",
             "백업 / 복원",
@@ -724,6 +725,7 @@ impl App {
             crate::icons::Icon::Settings,
             crate::icons::Icon::Home,
             crate::icons::Icon::Sticky,
+            crate::icons::Icon::Calendar,
             crate::icons::Icon::Alarm,
             crate::icons::Icon::Grid,
             crate::icons::Icon::Folder,
@@ -765,7 +767,7 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width((ui.available_width() - 12.).clamp(320., 600.));
                         ui.label(
-                            RichText::new(tabs[self.desktop.settings_tab.min(6)])
+                            RichText::new(tabs[self.desktop.settings_tab.min(tabs.len() - 1)])
                                 .size(17.)
                                 .strong(),
                         );
@@ -866,6 +868,38 @@ impl App {
                         }
                     }
                 });
+                section(ui, "첫 화면");
+                ui.horizontal_wrapped(|ui| {
+                    for (page, name, _) in crate::PAGES {
+                        if self.prefs.hidden_pages.contains(&page) {
+                            continue;
+                        }
+                        if crate::ui::pill(ui, self.prefs.start_page == page, name).clicked() {
+                            self.prefs.start_page = page;
+                        }
+                    }
+                });
+                hint(ui, "프로그램을 켰을 때 처음 보여 줄 메뉴입니다");
+                section(ui, "메뉴 숨기기");
+                ui.horizontal_wrapped(|ui| {
+                    for (page, name, _) in crate::PAGES.into_iter().filter(|p| p.0 != 0) {
+                        let mut hidden = self.prefs.hidden_pages.contains(&page);
+                        if ui.checkbox(&mut hidden, name).changed() {
+                            if hidden {
+                                self.prefs.hidden_pages.insert(page);
+                                if self.prefs.start_page == page {
+                                    self.prefs.start_page = 0;
+                                }
+                            } else {
+                                self.prefs.hidden_pages.remove(&page);
+                            }
+                        }
+                    }
+                });
+                hint(
+                    ui,
+                    "체크한 메뉴를 왼쪽 메뉴창에서 숨깁니다 · 내 작업실은 숨길 수 없습니다",
+                );
                 section(ui, "휴지통 보관 기간");
                 segmented(
                     ui,
@@ -970,6 +1004,34 @@ impl App {
                 );
             }
             3 => {
+                section(ui, "테마 (분리 캘린더 · 스탠딩 캘린더)");
+                ui.horizontal_wrapped(|ui| {
+                    let names = ["기본", "종이", "세이지", "나이트"];
+                    for (k, name) in names.into_iter().enumerate() {
+                        if crate::ui::pill(ui, self.cal.theme == k, name).clicked() {
+                            self.cal.theme = k;
+                        }
+                    }
+                });
+                section(ui, "캘린더 안 메모 글자 크기");
+                ui.add(
+                    egui::Slider::new(&mut self.prefs.cal_font, 9.0..=18.0)
+                        .step_by(0.5)
+                        .suffix(" pt"),
+                );
+                section(ui, "완료 일정");
+                toggle_row(
+                    ui,
+                    &mut self.prefs.cal_hide_done,
+                    "완료 일정 숨기기",
+                    "완료한 날의 일정을 캘린더 칸에서 감춥니다",
+                );
+                toggle_row(ui, &mut self.prefs.cal_strike, "완료 일정 취소선 긋기", "");
+                section(ui, "보기 단위");
+                segmented(ui, &mut self.prefs.cal_weeks, &["한 달", "1주", "2주"]);
+                hint(ui, "1주·2주 보기는 선택한 날짜가 있는 주부터 보여 줍니다");
+            }
+            4 => {
                 section(ui, "알림 소리");
                 let mut sound = usize::from(!self.desktop.sound);
                 if segmented(ui, &mut sound, &["Windows 기본", "소리 없음"]) {
@@ -998,7 +1060,7 @@ impl App {
                     self.desktop.last_action = "알림 미리보기 · 메모를 확인할 시간입니다".into();
                 }
             }
-            4 => {
+            5 => {
                 section(ui, "전역 단축키");
                 hint(ui, "다른 프로그램을 쓰는 중에도 동작합니다");
                 ui.add_space(4.);
@@ -1044,7 +1106,7 @@ impl App {
                     });
                 }
             }
-            5 => {
+            6 => {
                 section(ui, "데이터 위치");
                 ui.horizontal(|ui| {
                     ui.add(
@@ -1087,7 +1149,7 @@ impl App {
                 hint(ui, "저장·백업 엔진은 아직 연결 전입니다.");
             }
             _ => {
-                ui.label(RichText::new("MEMONOKING").size(16.).strong());
+                crate::ui::banner(ui, Vec2::new(260., 64.));
                 hint(ui, "개인 메모와 일정 작업 공간 · UI 미리보기 0.2.0");
                 ui.add_space(10.);
                 ui.label("화면·조작 미리보기입니다. 앱을 종료하면 메모와 설정이 초기화됩니다.");
