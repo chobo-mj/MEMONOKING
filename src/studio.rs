@@ -2,6 +2,9 @@ use crate::icons::{icon_button, Icon};
 use crate::*;
 use egui::{Pos2, Rect, Sense};
 use std::collections::BTreeMap;
+
+/// The color of the "중요 메모" star shown before titles.
+pub const STAR: Color32 = Color32::from_rgb(236, 168, 32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Editor,
@@ -18,17 +21,16 @@ pub struct Window {
     full_size: Vec2,
     title_width: f32,
     skip_title: bool,
-    sticker_size: Vec2,
+    pub sticker_size: Vec2,
     swatch_size: Vec2,
     applied: Option<(Mode, bool)>,
     focus: bool,
     center: bool,
     help: bool,
     native: crate::native_window::State,
-    related: bool,
     place: Option<Pos2>,
     swatch_drag: Option<(Vec2, Pos2, Vec2)>,
-    menu_at: Option<(Pos2, bool)>,
+    menu: Option<Menu>,
 }
 /// Desktop arrangement requested from a sticker's context menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,10 +63,9 @@ impl Window {
             center: true,
             help: false,
             native: Default::default(),
-            related: false,
             place: None,
             swatch_drag: None,
-            menu_at: None,
+            menu: None,
         }
     }
     fn reconcile(&mut self, n: &Note) {
@@ -230,9 +231,125 @@ impl App {
         self.toast = format!("스티커 {}개를 정렬했습니다", ids.len());
     }
     /// Arrangement and window actions. Returns true once an item was used.
+    /// Where stickers are arranged: the monitor chosen in the settings, or
+    /// the one the current window is on.
+    pub fn arrange_area(&self, ctx: &egui::Context) -> Rect {
+        self.desktop
+            .arrange_monitor
+            .and_then(|m| crate::native_window::monitors(ctx).get(m).copied())
+            .or_else(|| crate::native_window::work_area(ctx))
+            .unwrap_or_else(|| ctx.screen_rect())
+    }
+    /// Once a day from 05:00, open unfinished past memos and today's memos as
+    /// titles stacked on the right of the arrange monitor.
+    pub fn daily_today(&mut self, ctx: &egui::Context) {
+        if !self.desktop.daily_today {
+            return;
+        }
+        let day = (Local::now().naive_local() - chrono::Duration::hours(5)).date();
+        if self.desktop.daily_shown == Some(day) {
+            return;
+        }
+        self.desktop.daily_shown = Some(day);
+        let today = Local::now().date_naive();
+        let due: Vec<_> = self
+            .data
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| {
+                self.visible(*i)
+                    && !n.locked
+                    && n.date.is_some_and(|d| {
+                        (d < today && !n.done_on(Some(d)))
+                            || n.occurs(today) && !n.done_on(Some(today))
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        for i in due {
+            self.open_sticker(i, Some(today));
+        }
+        self.arrange = Some(Arrange {
+            layout: Layout::Right,
+            fold: Some(Mode::Title),
+            area: self.arrange_area(ctx),
+        });
+    }
+    /// Big numbered windows on every monitor; clicking one makes it the
+    /// monitor stickers are arranged on.
+    pub fn monitor_picker(&mut self, ctx: &egui::Context) {
+        if !self.desktop.monitor_pick {
+            return;
+        }
+        let monitors = crate::native_window::monitors(ctx);
+        if monitors.len() < 2 {
+            self.desktop.monitor_pick = false;
+            return;
+        }
+        let mut picked = None;
+        let mut cancel = false;
+        for (k, area) in monitors.iter().enumerate() {
+            let size = Vec2::new(360., 300.);
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("모니터 {}", k + 1))
+                .with_position(area.center() - size / 2.)
+                .with_inner_size(size)
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_taskbar(false)
+                .with_transparent(true)
+                .with_window_level(egui::WindowLevel::AlwaysOnTop);
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of(("monitor_pick", k)),
+                builder,
+                |ctx, _| {
+                    crate::win_style::shape(ctx, 0.78);
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE.fill(Color32::WHITE))
+                        .show(ctx, |ui| {
+                            let rect = ui.max_rect();
+                            let r = ui
+                                .interact(rect, ui.id().with("pick"), Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            ui.painter().text(
+                                rect.center() - Vec2::new(0., 18.),
+                                egui::Align2::CENTER_CENTER,
+                                (k + 1).to_string(),
+                                egui::FontId::proportional(170.),
+                                if r.hovered() { ACCENT } else { INK },
+                            );
+                            ui.painter().text(
+                                Pos2::new(rect.center().x, rect.bottom() - 34.),
+                                egui::Align2::CENTER_CENTER,
+                                "이 모니터에 스티커를 정렬하려면 누르세요",
+                                egui::FontId::proportional(14.),
+                                MUTED,
+                            );
+                            if r.clicked() {
+                                picked = Some(k);
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                cancel = true;
+                            }
+                        });
+                },
+            );
+        }
+        if let Some(k) = picked {
+            self.desktop.arrange_monitor = Some(k);
+            self.desktop.monitor_pick = false;
+            self.toast = format!("스티커 정렬 모니터를 {}번으로 정했습니다", k + 1);
+        } else if cancel {
+            self.desktop.monitor_pick = false;
+        }
+    }
     fn sticker_menu(&mut self, ui: &mut egui::Ui, i: usize, w: &mut Window, own: bool) -> bool {
         let ctx = ui.ctx().clone();
-        let area = crate::native_window::work_area(&ctx).unwrap_or_else(|| ctx.screen_rect());
+        let area = self.arrange_area(&ctx);
         let locked = self.data.notes[i].locked;
         ui.set_min_width(210.);
         let mut done = false;
@@ -302,65 +419,414 @@ impl App {
     /// Shows the sticker menu as its own small window at the pointer, so it
     /// is never clipped by a title bar or a tiny color box.
     fn sticker_menu_window(&mut self, ctx: &egui::Context, i: usize, w: &mut Window) {
-        let Some((at, mut had_focus)) = w.menu_at else {
+        let Some(mut m) = w.menu.take() else {
             return;
         };
         // A click back on the sticker itself dismisses the menu.
-        if ctx.input(|v| v.pointer.any_pressed()) {
-            w.menu_at = None;
+        if !std::mem::take(&mut m.fresh) && ctx.input(|v| v.pointer.any_pressed()) {
             return;
         }
-        let size = Vec2::new(
-            240.,
-            if w.mode == Mode::Swatch || w.mode == Mode::Title {
-                352.
-            } else {
-                312.
-            },
-        );
-        let builder = egui::ViewportBuilder::default()
-            .with_title("스티커 메뉴")
-            .with_position(at)
-            .with_inner_size(size)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_taskbar(false)
-            .with_transparent(true)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop);
-        let mut close = false;
-        ctx.show_viewport_immediate(
+        let area = crate::native_window::work_area(ctx).unwrap_or_else(|| ctx.screen_rect());
+        let pos = fit_in(m.at, m.size, area);
+        let mut sub = m.sub;
+        let mut done = false;
+        let paper = (m.kind == MenuKind::Linked).then_some(self.data.notes[i].color);
+        let shown = menu_window(
+            ctx,
             egui::ViewportId::from_hash_of(("sticker_menu", i)),
-            builder,
-            |ctx, _| {
-                let focused = ctx.input(|v| v.viewport().focused);
-                let lost = had_focus && focused == Some(false);
-                had_focus |= focused == Some(true);
-                crate::win_style::shape(ctx, 1.);
-                let mut frame = egui::Frame::popup(&ctx.style())
-                    .shadow(egui::epaint::Shadow::NONE)
-                    .inner_margin(egui::Margin::same(8));
-                if crate::win_style::NATIVE {
-                    frame = frame.corner_radius(0.);
-                }
-                egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-                    let v = &mut ui.style_mut().visuals.widgets;
-                    v.inactive.weak_bg_fill = Color32::TRANSPARENT;
-                    v.inactive.bg_fill = Color32::TRANSPARENT;
-                    ui.style_mut().spacing.button_padding = Vec2::new(8., 5.);
-                    ui.style_mut().spacing.item_spacing.y = 2.;
-                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                        if self.sticker_menu(ui, i, w, true) {
-                            close = true;
-                        }
-                    });
-                });
-                if ctx.input(|v| v.key_pressed(egui::Key::Escape)) || lost {
-                    close = true;
-                }
+            pos,
+            m.size,
+            paper,
+            |ui| match m.kind {
+                MenuKind::Context => self.sticker_menu(ui, i, w, true),
+                MenuKind::More => self.more_items(ui, i, w, pos, &mut sub),
+                MenuKind::Project => self.project_items(ui, i),
+                MenuKind::Linked => self.linked_items(ui, i),
             },
         );
-        w.menu_at = if close { None } else { Some((at, had_focus)) };
+        m.size = shown.size;
+        done |= shown.result == Some(true);
+        let mut focused = shown.focused;
+        let mut escape = shown.escape;
+        if let Some((kind, top)) = sub {
+            let parent = Rect::from_min_size(pos, m.size);
+            let spos = submenu_pos(parent, m.sub_size, top, area);
+            let shown = menu_window(
+                ctx,
+                egui::ViewportId::from_hash_of(("sticker_submenu", i)),
+                spos,
+                m.sub_size,
+                None,
+                |ui| match kind {
+                    SubMenu::Project => self.project_items(ui, i),
+                    SubMenu::Arrange => self.sticker_menu(ui, i, w, false),
+                },
+            );
+            m.sub_size = shown.size;
+            done |= shown.result == Some(true);
+            focused |= shown.focused;
+            escape |= shown.escape;
+        }
+        m.sub = sub;
+        // Focus moves between the menu and its submenu window; only close when
+        // neither has had it for a moment.
+        let now = ctx.input(|v| v.time);
+        if focused {
+            m.seen_focus = true;
+            m.away_since = None;
+        } else if m.seen_focus {
+            let since = *m.away_since.get_or_insert(now);
+            done |= now - since > 0.3;
+        }
+        if !(done || escape) {
+            w.menu = Some(m);
+        }
     }
+    /// The memo's "더보기" items. Rows with a submenu open it beside this
+    /// menu window instead of inside it.
+    fn more_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        w: &mut Window,
+        origin: Pos2,
+        sub: &mut Option<(SubMenu, f32)>,
+    ) -> bool {
+        let ctx = ui.ctx().clone();
+        let mut done = false;
+        let mut hovered_plain = false;
+        let mut plain = |r: &egui::Response| {
+            hovered_plain |= r.hovered();
+            r.clicked()
+        };
+        if plain(&ui.button("일정 설정…")) {
+            self.open_schedule(i);
+            done = true;
+        }
+        if plain(&ui.button("메모 잠금")) {
+            self.ask_lock(i);
+            done = true;
+        }
+        let mut wiki = self.data.notes[i].wiki;
+        let r = ui.checkbox(&mut wiki, "위키에 보관");
+        plain(&r);
+        if r.changed() {
+            self.data.notes[i].wiki = wiki;
+        }
+        for (label, kind) in [
+            ("프로젝트 설정", SubMenu::Project),
+            ("스티커 정렬", SubMenu::Arrange),
+        ] {
+            let open = sub.is_some_and(|(k, _)| k == kind);
+            let r = submenu_row(ui, label, open);
+            if r.hovered() || r.clicked() {
+                *sub = Some((kind, origin.y + r.rect.top() - 6.));
+            }
+        }
+        if plain(&ui.button("동일 프로젝트 보기")) {
+            self.project_filter = Some(self.data.notes[i].project.unwrap_or(NO_PROJECT));
+            self.page = 0;
+            ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Focus);
+            done = true;
+        }
+        if plain(&ui.button("메모 복제본 생성")) {
+            self.duplicate_note(i);
+            done = true;
+        }
+        ui.separator();
+        if plain(&ui.button("메모 삭제 · 휴지통")) {
+            self.trash_note(i);
+            w.open = false;
+            done = true;
+        }
+        if plain(&ui.button(RichText::new("메모 영구삭제…").color(ACCENT))) {
+            self.request_purge(i);
+            done = true;
+        }
+        ui.separator();
+        if plain(&ui.button("도움말")) {
+            w.help = true;
+            done = true;
+        }
+        if plain(&ui.button("메모창 설정")) {
+            self.settings = true;
+            crate::ui::raise(&ctx, "settings");
+            self.desktop.settings_tab = 2;
+            done = true;
+        }
+        if hovered_plain {
+            *sub = None;
+        }
+        done
+    }
+    /// Memos linked to `i`, each in a bar of its own color; a click opens it
+    /// as a sticker.
+    pub(crate) fn linked_items(&mut self, ui: &mut egui::Ui, i: usize) -> bool {
+        let linked: Vec<_> = self
+            .data
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(j, n)| {
+                self.visible(*j)
+                    && *j != i
+                    && (n.parents.contains(&i)
+                        || self.data.notes[i].parents.contains(j)
+                        || self.data.links.contains(&(i.min(*j), i.max(*j))))
+            })
+            .map(|(j, _)| j)
+            .collect();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("연결된 메모").strong().size(13.).color(INK));
+            ui.label(
+                RichText::new(linked.len().to_string())
+                    .size(12.)
+                    .color(MUTED),
+            );
+        });
+        ui.add_space(4.);
+        if linked.is_empty() {
+            crate::ui::hint(ui, "연결된 메모가 없습니다");
+            crate::ui::hint(ui, "전체메모 › 관계 보드에서 연결할 수 있습니다");
+            ui.add_space(4.);
+            return false;
+        }
+        let mut open = None;
+        ui.spacing_mut().item_spacing.y = 6.;
+        for j in linked {
+            let n = &self.data.notes[j];
+            let (rect, r) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.), Sense::click());
+            let fill = if r.hovered() {
+                mix(n.color, Color32::BLACK, 0.1)
+            } else {
+                n.color
+            };
+            ui.painter().rect(
+                rect,
+                8.,
+                fill,
+                egui::Stroke::new(
+                    1.0_f32,
+                    Color32::from_black_alpha(if r.hovered() { 40 } else { 22 }),
+                ),
+                egui::StrokeKind::Inside,
+            );
+            let title = if n.title.is_empty() {
+                "새 메모"
+            } else {
+                &n.title
+            };
+            let text = if n.starred {
+                format!("★  {title}")
+            } else {
+                title.to_string()
+            };
+            let painter = ui.painter().with_clip_rect(rect.shrink(4.));
+            painter.text(
+                Pos2::new(rect.left() + 12., rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                text,
+                egui::FontId::proportional(13.5),
+                INK,
+            );
+            let r = r
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("스티커로 열기");
+            if r.clicked() {
+                open = Some(j);
+            }
+        }
+        if let Some(j) = open {
+            self.open_sticker(j, self.data.notes[j].date);
+        }
+        open.is_some()
+    }
+    /// Pick the memo's project. Returns true once one is chosen.
+    pub(crate) fn project_items(&mut self, ui: &mut egui::Ui, i: usize) -> bool {
+        crate::ui::caption(ui, "프로젝트");
+        let mut picked = false;
+        let current = self.data.notes[i].project;
+        let mut choices = vec![(None, "프로젝트 없음".to_string())];
+        for (p, name) in self.data.projects.iter().enumerate() {
+            if !self.extra.hidden_projects.contains(&p) && !self.extra.deleted_projects.contains(&p)
+            {
+                choices.push((Some(p), name.clone()));
+            }
+        }
+        for (p, name) in choices {
+            let label = if p.is_some() {
+                format!("#  {name}")
+            } else {
+                name
+            };
+            if ui.selectable_label(current == p, label).clicked() {
+                self.data.notes[i].project = p;
+                picked = true;
+            }
+        }
+        picked
+    }
+}
+
+/// Which menu a sticker shows in its menu window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuKind {
+    /// Right click: arrange and close stickers.
+    Context,
+    /// The "더보기" button.
+    More,
+    /// The footer's project picker.
+    Project,
+    /// The footer's linked memos, in the sticker's own color.
+    Linked,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SubMenu {
+    Project,
+    Arrange,
+}
+/// A sticker menu shown in its own always-on-top window, so short stickers
+/// never clip it; its submenu gets a second window beside it.
+#[derive(Clone, Copy, Debug)]
+pub struct Menu {
+    kind: MenuKind,
+    at: Pos2,
+    size: Vec2,
+    sub: Option<(SubMenu, f32)>,
+    sub_size: Vec2,
+    seen_focus: bool,
+    away_since: Option<f64>,
+    /// Opened this frame: the click that opened it may still read as a press.
+    fresh: bool,
+}
+impl Menu {
+    fn new(kind: MenuKind, at: Pos2) -> Self {
+        Self {
+            kind,
+            at,
+            size: Vec2::new(228., 120.),
+            sub: None,
+            sub_size: Vec2::new(228., 120.),
+            seen_focus: false,
+            away_since: None,
+            fresh: true,
+        }
+    }
+}
+/// Toggle `kind` opening below `anchor` (a rect in the sticker's points).
+fn toggle_menu(ctx: &egui::Context, w: &mut Window, kind: MenuKind, anchor: Rect) {
+    if w.menu.is_some_and(|m| m.kind == kind) {
+        w.menu = None;
+        return;
+    }
+    let origin = ctx
+        .input(|v| v.viewport().inner_rect.map(|r| r.min))
+        .unwrap_or_default();
+    w.menu = Some(Menu::new(
+        kind,
+        origin + anchor.left_bottom().to_vec2() + Vec2::new(0., 2.),
+    ));
+}
+/// Keep a window of `size` at `at` inside `area`.
+fn fit_in(at: Pos2, size: Vec2, area: Rect) -> Pos2 {
+    Pos2::new(
+        at.x.min(area.right() - size.x).max(area.left()),
+        at.y.min(area.bottom() - size.y).max(area.top()),
+    )
+}
+/// Place a submenu beside `parent`: on the right, or on the left when the
+/// right side would leave the work area.
+fn submenu_pos(parent: Rect, size: Vec2, top: f32, area: Rect) -> Pos2 {
+    let right = parent.right() + 2.;
+    let x = if right + size.x <= area.right() {
+        right
+    } else {
+        (parent.left() - 2. - size.x).max(area.left())
+    };
+    fit_in(Pos2::new(x, top), size, area)
+}
+fn submenu_row(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
+    let r = ui.add(egui::Button::new(label).selected(open));
+    ui.painter().text(
+        Pos2::new(r.rect.right() - 10., r.rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "›",
+        egui::FontId::proportional(15.),
+        crate::ui::t(ui).muted,
+    );
+    r
+}
+struct Shown<R> {
+    size: Vec2,
+    focused: bool,
+    escape: bool,
+    result: Option<R>,
+}
+/// One borderless always-on-top menu window at `pos`; it resizes itself to
+/// its content.
+fn menu_window<R>(
+    ctx: &egui::Context,
+    id: egui::ViewportId,
+    pos: Pos2,
+    size: Vec2,
+    paper: Option<Color32>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> Shown<R> {
+    let builder = egui::ViewportBuilder::default()
+        .with_title("메모 메뉴")
+        .with_position(pos)
+        .with_inner_size(size)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_transparent(true)
+        .with_window_level(egui::WindowLevel::AlwaysOnTop);
+    let mut shown = Shown {
+        size,
+        focused: false,
+        escape: false,
+        result: None,
+    };
+    let mut add = Some(add);
+    ctx.show_viewport_immediate(id, builder, |ctx, _| {
+        shown.focused = ctx.input(|v| v.viewport().focused == Some(true));
+        shown.escape = ctx.input(|v| v.key_pressed(egui::Key::Escape));
+        crate::win_style::shape(ctx, 1.);
+        let mut frame = egui::Frame::popup(&ctx.style())
+            .shadow(egui::epaint::Shadow::NONE)
+            .inner_margin(egui::Margin::same(6));
+        if crate::win_style::NATIVE {
+            frame = frame.corner_radius(0.);
+        }
+        if let Some(paper) = paper {
+            frame = frame
+                .fill(paper)
+                .stroke(egui::Stroke::new(1.0_f32, Color32::from_black_alpha(28)));
+        }
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+            if let Some(paper) = paper {
+                paper_style(ui, paper);
+            }
+            let v = &mut ui.style_mut().visuals.widgets;
+            v.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            v.inactive.bg_fill = Color32::TRANSPARENT;
+            ui.style_mut().spacing.button_padding = Vec2::new(10., 5.);
+            ui.style_mut().spacing.item_spacing.y = 2.;
+            let r = ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                ui.set_width(size.x - 12.);
+                add.take().map(|f| f(ui))
+            });
+            shown.result = r.inner;
+            let want = Vec2::new(size.x, (r.response.rect.height() + 14.).ceil());
+            if (want.y - size.y).abs() > 1. {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(want));
+            }
+            shown.size = want;
+        });
+    });
+    shown
 }
 fn open_menu(ctx: &egui::Context, w: &mut Window) {
     let (origin, pointer) = ctx.input(|v| {
@@ -370,7 +836,7 @@ fn open_menu(ctx: &egui::Context, w: &mut Window) {
         )
     });
     if let (Some(origin), Some(pointer)) = (origin, pointer) {
-        w.menu_at = Some((origin + pointer.to_vec2(), false));
+        w.menu = Some(Menu::new(MenuKind::Context, origin + pointer.to_vec2()));
     }
 }
 pub fn viewport(i: usize) -> egui::ViewportId {
@@ -564,33 +1030,38 @@ impl App {
                         )
                         .show(ctx, |ui| {
                             paper_style(ui, paper);
+                            // Tooltips cannot fit in a 44 px tall window: egui kept
+                            // flipping them above and below the pointer (flicker).
+                            ui.style_mut().interaction.tooltip_delay = f32::INFINITY;
                             let hover = !self.desktop.auto_toolbar
                                 || ui.rect_contains_pointer(ui.max_rect());
+                            let button = 28. + ui.spacing().item_spacing.x;
                             ui.horizontal(|ui| {
-                                if hover
-                                    && icon_button(ui, Icon::Fold, "색상 상자로 접기").clicked()
-                                {
-                                    w.fold();
+                                // The buttons' space is always reserved so the title
+                                // does not move when they appear on hover.
+                                if hover {
+                                    if icon_button(ui, Icon::Edit, "메모 상세 편집").clicked()
+                                    {
+                                        w.edit();
+                                    }
+                                } else {
+                                    ui.add_space(button);
                                 }
-                                let width = (ui.available_width()
-                                    - if hover {
-                                        2. * (28. + ui.spacing().item_spacing.x)
+                                let starred = self.data.notes[i].starred;
+                                if starred {
+                                    ui.label(RichText::new("★").color(STAR).size(15.));
+                                }
+                                let width = (ui.available_width() - 2. * button).max(40.);
+                                let r = ui.add_sized(
+                                    [width, 26.],
+                                    egui::Label::new(if self.data.notes[i].title.is_empty() {
+                                        "새 메모"
                                     } else {
-                                        0.
+                                        &self.data.notes[i].title
                                     })
-                                .max(40.);
-                                let r = ui
-                                    .add_sized(
-                                        [width, 26.],
-                                        egui::Label::new(if self.data.notes[i].title.is_empty() {
-                                            "새 메모"
-                                        } else {
-                                            &self.data.notes[i].title
-                                        })
-                                        .truncate()
-                                        .sense(Sense::click_and_drag()),
-                                    )
-                                    .on_hover_text("클릭: 스티커 · 드래그: 이동 · 양끝: 폭 조절");
+                                    .truncate()
+                                    .sense(Sense::click_and_drag()),
+                                );
                                 if r.clicked() {
                                     w.sticker();
                                 } else if r.drag_started() || r.drag_stopped() {
@@ -600,9 +1071,9 @@ impl App {
                                     open_menu(ctx, &mut w);
                                 }
                                 if hover {
-                                    if icon_button(ui, Icon::Edit, "메모 상세 편집").clicked()
+                                    if icon_button(ui, Icon::Fold, "색상 상자로 접기").clicked()
                                     {
-                                        w.edit();
+                                        w.fold();
                                     }
                                     pin_button(ui, &mut self.data.notes[i].topmost);
                                 }
@@ -636,7 +1107,9 @@ impl App {
                             if r.drag_started() || r.drag_stopped() {
                                 w.native.start_drag(ctx);
                             }
-                            if r.double_clicked() {
+                            // A click (no movement) unfolds; moving the pointer
+                            // first turns the press into a window drag instead.
+                            if r.clicked() {
                                 if locked {
                                     self.ask_unlock(i, true);
                                 } else {
@@ -706,13 +1179,19 @@ impl App {
                                         &self.data.notes[i].document.font_name,
                                     ),
                                 );
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.data.notes[i].title)
-                                        .font(font)
-                                        .frame(false)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("제목"),
-                                );
+                                ui.horizontal(|ui| {
+                                    if self.data.notes[i].starred {
+                                        ui.label(RichText::new("★").color(STAR).size(17.))
+                                            .on_hover_text("중요 메모");
+                                    }
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.data.notes[i].title)
+                                            .font(font)
+                                            .frame(false)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("제목"),
+                                    );
+                                });
                             } else {
                                 self.note_editor(ui);
                             }
@@ -762,19 +1241,25 @@ impl App {
                                 ui,
                                 &mut self.data.notes[i].document,
                                 ("memo_document", i),
-                                if engaged { 30. } else { 0. },
+                                if engaged { 62. } else { 0. },
                                 mode == Mode::Editor,
                             );
                             if engaged {
-                                let arrow = Rect::from_min_size(
-                                    Pos2::new(rect.right() - 28., rect.bottom() - 28.),
-                                    Vec2::splat(28.),
+                                let arrows = Rect::from_min_size(
+                                    Pos2::new(rect.right() - 60., rect.bottom() - 28.),
+                                    Vec2::new(60., 28.),
                                 );
-                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrow), |ui| {
-                                    if icon_button(ui, Icon::ChevronRight, "연결된 메모").clicked()
-                                    {
-                                        w.related = !w.related;
-                                    }
+                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(arrows), |ui| {
+                                    ui.horizontal(|ui| {
+                                        let r = icon_button(ui, Icon::ChevronDown, "프로젝트 선택");
+                                        if r.clicked() {
+                                            toggle_menu(ctx, &mut w, MenuKind::Project, r.rect);
+                                        }
+                                        let r = icon_button(ui, Icon::ChevronRight, "연결된 메모");
+                                        if r.clicked() {
+                                            toggle_menu(ctx, &mut w, MenuKind::Linked, r.rect);
+                                        }
+                                    });
                                 });
                             }
                         });
@@ -829,7 +1314,7 @@ impl App {
                 if w.mode != mode || !w.open {
                     w.native.cancel();
                     w.help = false;
-                    w.related = false;
+                    w.menu = None;
                     if w.mode == Mode::Swatch && self.desktop.unpin_minimized {
                         self.data.notes[i].topmost = false;
                     }
@@ -875,52 +1360,6 @@ impl App {
                     },
                 );
                 w.help = help;
-                if w.related {
-                    let related: Vec<_> = self
-                        .data
-                        .notes
-                        .iter()
-                        .enumerate()
-                        .filter(|(j, n)| {
-                            self.visible(*j)
-                                && *j != i
-                                && (n.parents.contains(&i)
-                                    || self.data.notes[i].parents.contains(j)
-                                    || self.data.links.contains(&(i.min(*j), i.max(*j))))
-                        })
-                        .map(|(j, _)| j)
-                        .collect();
-                    let mut open = true;
-                    crate::ui::dialog(
-                        ctx,
-                        ("memo_related", i),
-                        "연결된 메모",
-                        [300., 280.],
-                        true,
-                        &mut open,
-                        |ui| {
-                            if related.is_empty() {
-                                crate::ui::hint(ui, "연결된 메모가 없습니다");
-                                crate::ui::hint(ui, "전체메모 › 관계 보드에서 연결할 수 있습니다");
-                            }
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                for j in related {
-                                    if ui
-                                        .add(
-                                            egui::Button::new(&self.data.notes[j].title)
-                                                .frame(false),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.open_sticker(j, self.data.notes[j].date);
-                                        w.related = false;
-                                    }
-                                }
-                            });
-                        },
-                    );
-                    w.related &= open;
-                }
             });
             if self.active == i {
                 w.occurrence = self.extra.edit_occurrence;
@@ -975,7 +1414,7 @@ impl App {
                 w.open = false;
             }
             w.help = false;
-            w.related = false;
+            w.menu = None;
             self.extra.picker = None;
         }
     }
@@ -1011,7 +1450,7 @@ impl App {
                 }
             }
             let controls = if mode == Mode::Editor {
-                6.
+                7.
             } else if engaged {
                 8.
             } else {
@@ -1038,7 +1477,10 @@ impl App {
                 open_menu(ctx, w);
             }
             if engaged {
-                self.memo_more(ui, ctx, i, w);
+                let r = icon_button(ui, Icon::More, "더보기");
+                if r.clicked() {
+                    toggle_menu(ctx, w, MenuKind::More, r.rect);
+                }
             }
             if mode == Mode::Editor {
                 crate::ui::icon_menu(ui, Icon::Opacity, "메모 투명도", |ui| {
@@ -1059,7 +1501,7 @@ impl App {
             if engaged && icon_button(ui, Icon::Alarm, "알람 날짜와 시간").clicked() {
                 self.open_reminder(i);
             }
-            if mode == Mode::Sticker && engaged {
+            if engaged {
                 let n = &self.data.notes[i];
                 let tip = match n.date {
                     Some(d) if n.repeat.is_none() => format!("일정 · {}", d.format("%m.%d")),
@@ -1069,7 +1511,9 @@ impl App {
                 if icon_button(ui, Icon::Calendar, &tip).clicked() {
                     self.open_schedule(i);
                 }
-                if icon_button(ui, Icon::Edit, "메모 편집 창 열기").clicked() {
+                if mode == Mode::Sticker
+                    && icon_button(ui, Icon::Edit, "메모 편집 창 열기").clicked()
+                {
                     w.edit();
                 }
             }
@@ -1117,73 +1561,6 @@ impl App {
             }
             if engaged && icon_button(ui, Icon::Close, "창 닫기 · 메모는 유지").clicked() {
                 w.open = false;
-            }
-        });
-    }
-    fn memo_more(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, i: usize, w: &mut Window) {
-        crate::ui::icon_menu(ui, Icon::More, "더보기", |ui| {
-            ui.set_min_width(200.);
-            if ui.button("일정 설정…").clicked() {
-                self.open_schedule(i);
-                ui.close_menu();
-            }
-            if ui.button("메모 잠금").clicked() {
-                self.ask_lock(i);
-                ui.close_menu();
-            }
-            let mut wiki = self.data.notes[i].wiki;
-            if ui.checkbox(&mut wiki, "위키에 보관").changed() {
-                self.data.notes[i].wiki = wiki;
-            }
-            ui.menu_button("프로젝트 설정", |ui| {
-                ui.selectable_value(&mut self.data.notes[i].project, None, "프로젝트 없음");
-                for (p, name) in self.data.projects.iter().enumerate() {
-                    if !self.extra.hidden_projects.contains(&p)
-                        && !self.extra.deleted_projects.contains(&p)
-                    {
-                        ui.selectable_value(&mut self.data.notes[i].project, Some(p), name);
-                    }
-                }
-            });
-            if ui.button("동일 프로젝트 보기").clicked() {
-                self.project_filter = Some(self.data.notes[i].project.unwrap_or(NO_PROJECT));
-                self.page = 0;
-                ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd_to(main_viewport(), egui::ViewportCommand::Focus);
-                ui.close_menu();
-            }
-            if ui.button("메모 복제본 생성").clicked() {
-                self.duplicate_note(i);
-                ui.close_menu();
-            }
-            ui.menu_button("스티커 정렬", |ui| {
-                if self.sticker_menu(ui, i, w, false) {
-                    ui.close_menu();
-                }
-            });
-            ui.separator();
-            if ui.button("메모 삭제 · 휴지통").clicked() {
-                self.trash_note(i);
-                w.open = false;
-                ui.close_menu();
-            }
-            if ui
-                .button(RichText::new("메모 영구삭제…").color(ACCENT))
-                .clicked()
-            {
-                self.request_purge(i);
-                ui.close_menu();
-            }
-            ui.separator();
-            if ui.button("도움말").clicked() {
-                w.help = true;
-                ui.close_menu();
-            }
-            if ui.button("메모창 설정").clicked() {
-                self.settings = true;
-                crate::ui::raise(ctx, "settings");
-                self.desktop.settings_tab = 2;
-                ui.close_menu();
             }
         });
     }
@@ -1487,6 +1864,21 @@ mod occurrence_window_tests {
 #[cfg(test)]
 mod arrangement_tests {
     use super::*;
+    #[test]
+    fn submenus_open_outside_their_menu_right_first_then_left() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 800.));
+        let size = Vec2::new(200., 150.);
+        let parent = Rect::from_min_size(Pos2::new(100., 100.), Vec2::new(220., 300.));
+        let p = submenu_pos(parent, size, 140., area);
+        assert_eq!(p, Pos2::new(322., 140.));
+        // Near the right edge it flips to the left, never overlapping.
+        let parent = Rect::from_min_size(Pos2::new(700., 100.), Vec2::new(220., 300.));
+        let p = submenu_pos(parent, size, 140., area);
+        assert!(p.x + size.x <= parent.left());
+        // A menu near the bottom is pulled up to stay visible.
+        let p = submenu_pos(parent, size, 760., area);
+        assert_eq!(p.y, 650.);
+    }
     #[test]
     fn right_layout_stacks_from_top_right_and_wraps_into_a_new_column() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 300.));

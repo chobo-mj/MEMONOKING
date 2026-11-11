@@ -274,8 +274,12 @@ impl App {
             .copied();
         self.editor = true;
         self.sticky = true;
+        let new_window = !self.studio.windows.contains_key(&i);
         self.studio.open(i, self.extra.edit_occurrence);
         if let Some(w) = self.studio.windows.get_mut(&i) {
+            if new_window {
+                w.sticker_size = self.desktop.sticker_size;
+            }
             w.schedule_start = self.data.notes[i].date;
             if self.desktop.always_sticker {
                 w.sticker();
@@ -367,6 +371,8 @@ impl eframe::App for App {
             );
             self.floating = open;
         }
+        self.daily_today(ctx);
+        self.monitor_picker(ctx);
         self.apply_arrangement(ctx);
         self.detached_note(ctx);
         self.global_dialogs(ctx);
@@ -468,6 +474,8 @@ impl App {
                     } else {
                         self.agenda(ui, 0);
                     }
+                } else if matches!(self.page, 2 | 3) {
+                    self.agenda_preview(ui);
                 } else {
                     egui::ScrollArea::vertical()
                         .id_salt(("page_scroll", self.page))
@@ -788,8 +796,8 @@ impl App {
 /// Navigation pages: (page index, label, icon) in display order.
 const PAGES: [(usize, &str, icons::Icon); 7] = [
     (0, "내 작업실", icons::Icon::Home),
-    (2, "오늘", icons::Icon::Today),
-    (3, "다음", icons::Icon::Upcoming),
+    (2, "오늘의 할일", icons::Icon::Today),
+    (3, "다음에 할일", icons::Icon::Upcoming),
     (5, "캘린더", icons::Icon::Calendar),
     (4, "전체메모", icons::Icon::Notes),
     (1, "나만의 위키", icons::Icon::Book),

@@ -49,6 +49,15 @@ pub struct Desktop {
     pub schedule: Option<crate::schedule::ScheduleEdit>,
     /// Open memos as stickers; the editor is entered from the sticker's edit button.
     pub always_sticker: bool,
+    /// Size of newly opened stickers.
+    pub sticker_size: Vec2,
+    /// Every day (from 05:00) open unfinished past and today's memos as
+    /// titles arranged on the right.
+    pub daily_today: bool,
+    pub daily_shown: Option<NaiveDate>,
+    /// Monitor (index into `native_window::monitors`) used for arranging.
+    pub arrange_monitor: Option<usize>,
+    pub monitor_pick: bool,
 }
 impl Default for Desktop {
     fn default() -> Self {
@@ -99,6 +108,11 @@ impl Default for Desktop {
             focus_dialog: false,
             schedule: None,
             always_sticker: true,
+            sticker_size: Vec2::splat(360.),
+            daily_today: false,
+            daily_shown: None,
+            arrange_monitor: None,
+            monitor_pick: false,
         }
     }
 }
@@ -173,22 +187,39 @@ impl App {
             });
             return;
         }
-        let n = &mut self.data.notes[i];
-        let fill = n.color;
+        let day = if self.catalog.selected == Some(i) {
+            self.catalog.selected_day
+        } else {
+            None
+        };
+        let mut done = self.data.notes[i].done_on(day);
+        let mut done_changed = false;
+        let mut action = None;
+        let fill = self.data.notes[i].color;
         egui::Frame::NONE
             .fill(fill)
             .corner_radius(18.)
             .inner_margin(20.)
             .show(ui, |ui| {
                 ui.visuals_mut().override_text_color = Some(INK);
-                ui.add(
-                    egui::TextEdit::multiline(&mut n.title)
-                        .font(egui::FontId::proportional(22.))
-                        .desired_rows(1)
-                        .desired_width(f32::INFINITY)
-                        .frame(false)
-                        .hint_text("제목"),
-                );
+                let n = &mut self.data.notes[i];
+                ui.horizontal_top(|ui| {
+                    if n.starred {
+                        ui.label(RichText::new("★").color(crate::studio::STAR).size(20.));
+                    }
+                    ui.add(
+                        egui::TextEdit::multiline(&mut n.title)
+                            .font(egui::FontId::proportional(22.))
+                            .desired_rows(1)
+                            .desired_width((ui.available_width() - 34.).max(60.))
+                            .frame(false)
+                            .hint_text("제목"),
+                    );
+                    ui.add_space((ui.available_width() - 24.).max(0.));
+                    done_changed = ui::round_check(ui, &mut done, None)
+                        .on_hover_text("완료")
+                        .changed();
+                });
                 ui.add_space(8.);
                 ui.separator();
                 ui.add_space(8.);
@@ -204,9 +235,73 @@ impl App {
                     }
                 }
                 n.document.toolbar_visible = true;
-                crate::composer::show(ui, &mut n.body, &mut n.document, ("inline", i));
+                let tools = 4. * 30.;
+                crate::composer::show_with(ui, &mut n.body, &mut n.document, ("inline", i), tools);
+                // Memo actions sit at the right end of the tool row.
+                let area = ui.min_rect();
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(area.right() - tools, area.bottom() - 28.),
+                    area.right_bottom(),
+                );
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.;
+                        if icons::icon_button(ui, icons::Icon::Alarm, "알람").clicked() {
+                            action = Some(0);
+                        }
+                        if icons::icon_button(ui, icons::Icon::Calendar, "일정").clicked() {
+                            action = Some(1);
+                        }
+                        let project =
+                            icons::icon_button(ui, icons::Icon::ChevronDown, "프로젝트 선택");
+                        let popup = ui.make_persistent_id(("inline_project", i));
+                        if project.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(popup));
+                        }
+                        egui::popup_above_or_below_widget(
+                            ui,
+                            popup,
+                            &project,
+                            egui::AboveOrBelow::Above,
+                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
+                                ui.set_min_width(200.);
+                                if self.project_items(ui, i) {
+                                    ui.memory_mut(|m| m.close_popup());
+                                }
+                            },
+                        );
+                        let linked =
+                            icons::icon_button(ui, icons::Icon::ChevronRight, "연결된 메모");
+                        let popup = ui.make_persistent_id(("inline_linked", i));
+                        if linked.clicked() {
+                            ui.memory_mut(|m| m.toggle_popup(popup));
+                        }
+                        egui::popup_above_or_below_widget(
+                            ui,
+                            popup,
+                            &linked,
+                            egui::AboveOrBelow::Above,
+                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
+                                ui.set_min_width(240.);
+                                if self.linked_items(ui, i) {
+                                    ui.memory_mut(|m| m.close_popup());
+                                }
+                            },
+                        );
+                    });
+                });
             });
+        if done_changed {
+            self.done_at(i, day, done);
+        }
         self.consume_body_project(i);
+        match action {
+            Some(0) => self.open_reminder(i),
+            Some(1) => self.open_schedule(i),
+            _ => {}
+        }
     }
     pub fn consume_body_project(&mut self, i: usize) {
         let first = self.data.notes[i].body.clone();
@@ -705,6 +800,72 @@ impl App {
                     "메모창을 작업표시줄에 표시",
                     "끄면 트레이 아이콘으로만 표시합니다",
                 );
+                section(ui, "새 스티커 메모 크기");
+                let mut preset = match self.desktop.sticker_size {
+                    s if s == Vec2::new(280., 240.) => 0,
+                    s if s == Vec2::splat(360.) => 1,
+                    s if s == Vec2::new(460., 440.) => 2,
+                    _ => 3,
+                };
+                if segmented(ui, &mut preset, &["작게", "보통", "크게", "직접 설정"]) {
+                    match preset {
+                        0 => self.desktop.sticker_size = Vec2::new(280., 240.),
+                        1 => self.desktop.sticker_size = Vec2::splat(360.),
+                        2 => self.desktop.sticker_size = Vec2::new(460., 440.),
+                        _ => {}
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("너비");
+                    ui.add(
+                        egui::Slider::new(&mut self.desktop.sticker_size.x, 340.0..=900.0)
+                            .step_by(10.)
+                            .suffix(" px"),
+                    );
+                    ui.add_space(12.);
+                    ui.label("높이");
+                    ui.add(
+                        egui::Slider::new(&mut self.desktop.sticker_size.y, 220.0..=900.0)
+                            .step_by(10.)
+                            .suffix(" px"),
+                    );
+                });
+                hint(ui, "새로 여는 스티커 메모에 적용됩니다");
+                ui.add_space(6.);
+                if toggle_row(
+                    ui,
+                    &mut self.desktop.daily_today,
+                    "매일 오늘 메모 자동으로 띄우기",
+                    "매일 새벽 5시 기준으로 완료하지 않은 지난 메모와 오늘 메모를 제목만 보기로 화면 오른쪽에 정렬합니다",
+                )
+                .changed()
+                    && self.desktop.daily_today
+                {
+                    self.desktop.daily_shown = None;
+                }
+                let monitors = crate::native_window::monitors(ui.ctx()).len();
+                let mut pick = self.desktop.arrange_monitor.is_some() || self.desktop.monitor_pick;
+                ui.add_enabled_ui(monitors >= 2, |ui| {
+                    if toggle_row(
+                        ui,
+                        &mut pick,
+                        "메모 정렬 모니터 정하기",
+                        &match self.desktop.arrange_monitor {
+                            Some(m) => format!("스티커 자동 정렬을 모니터 {}에 합니다", m + 1),
+                            None if monitors >= 2 => {
+                                "켜면 각 모니터에 번호가 뜹니다 · 정렬에 쓸 모니터의 번호를 누르세요".into()
+                            }
+                            None => "모니터가 두 대 이상일 때 사용할 수 있습니다".into(),
+                        },
+                    )
+                    .changed()
+                    {
+                        self.desktop.monitor_pick = pick;
+                        if !pick {
+                            self.desktop.arrange_monitor = None;
+                        }
+                    }
+                });
                 section(ui, "휴지통 보관 기간");
                 segmented(
                     ui,

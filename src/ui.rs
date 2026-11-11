@@ -823,24 +823,25 @@ pub fn month_grid(ui: &mut Ui, month: &mut chrono::NaiveDate, day: &mut chrono::
                 .strong()
                 .size(15.),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if crate::icons::icon_button(ui, Icon::ChevronRight, "다음 달").clicked() {
-                *month = (*month + Duration::days(32)).with_day(1).unwrap();
-            }
-            if crate::icons::icon_button(ui, Icon::ChevronLeft, "이전 달").clicked() {
-                *month = (*month - Duration::days(1)).with_day(1).unwrap();
-            }
-        });
+        ui.add_space(4.);
+        if crate::icons::icon_button(ui, Icon::ChevronLeft, "이전 달").clicked() {
+            *month = (*month - Duration::days(1)).with_day(1).unwrap();
+        }
+        if crate::icons::icon_button(ui, Icon::ChevronRight, "다음 달").clicked() {
+            *month = (*month + Duration::days(32)).with_day(1).unwrap();
+        }
     });
     ui.add_space(4.);
-    let cell = 34.;
-    let (head, _) = ui.allocate_exact_size(Vec2::new(cell * 7., 20.), Sense::hover());
+    // The grid spans the window width; rows keep a compact height.
+    let cell_w = (ui.available_width() / 7.).max(34.);
+    let cell_h = 34.;
+    let (head, _) = ui.allocate_exact_size(Vec2::new(cell_w * 7., 20.), Sense::hover());
     for (i, s) in ["일", "월", "화", "수", "목", "금", "토"]
         .iter()
         .enumerate()
     {
         ui.painter().text(
-            Pos2::new(head.left() + cell * (i as f32 + 0.5), head.center().y),
+            Pos2::new(head.left() + cell_w * (i as f32 + 0.5), head.center().y),
             egui::Align2::CENTER_CENTER,
             *s,
             FontId::proportional(11.5),
@@ -853,15 +854,15 @@ pub fn month_grid(ui: &mut Ui, month: &mut chrono::NaiveDate, day: &mut chrono::
     }
     let offset = month.weekday().num_days_from_sunday() as i64;
     let today = chrono::Local::now().date_naive();
-    let (grid, _) = ui.allocate_exact_size(Vec2::new(cell * 7., cell * 6.), Sense::hover());
+    let (grid, _) = ui.allocate_exact_size(Vec2::new(cell_w * 7., cell_h * 6.), Sense::hover());
     for slot in 0..42 {
         let d = *month + Duration::days(slot - offset);
         if d.month() != month.month() {
             continue;
         }
         let r = Rect::from_min_size(
-            grid.min + Vec2::new((slot % 7) as f32 * cell, (slot / 7) as f32 * cell),
-            Vec2::splat(cell),
+            grid.min + Vec2::new((slot % 7) as f32 * cell_w, (slot / 7) as f32 * cell_h),
+            Vec2::new(cell_w, cell_h),
         )
         .shrink(2.);
         let resp = ui
@@ -904,16 +905,137 @@ pub fn time_row(ui: &mut Ui, hour: &mut u32, minute: &mut u32) {
         let c = t(ui).muted;
         ui.label(RichText::new("시간").color(c));
         ui.add_space(8.);
-        ui.add(
-            egui::DragValue::new(hour)
-                .range(0..=23)
-                .custom_formatter(|v, _| format!("{:02}", v as u32)),
-        );
-        ui.label(":");
-        ui.add(
-            egui::DragValue::new(minute)
-                .range(0..=59)
-                .custom_formatter(|v, _| format!("{:02}", v as u32)),
-        );
+        time_input(ui, "time_row", hour, minute);
     });
+}
+
+/// Step a time by `delta` minutes, wrapping around midnight.
+pub fn step_minutes(hour: u32, minute: u32, delta: i32) -> (u32, u32) {
+    let total = (hour as i32 * 60 + minute as i32 + delta).rem_euclid(24 * 60);
+    ((total / 60) as u32, (total % 60) as u32)
+}
+
+/// Hour and minute boxes. A click opens a picker of whole hours and
+/// 5-minute steps; the arrows beside the minutes step by one minute.
+pub fn time_input(ui: &mut Ui, id: impl Hash, hour: &mut u32, minute: &mut u32) {
+    let c = t(ui);
+    let popup = ui.make_persistent_id(("time_input", id));
+    let height = 28.;
+    ui.spacing_mut().item_spacing.x = 0.;
+    let field = |ui: &mut Ui, text: String| {
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(38., height), Sense::click());
+        let fill = if r.hovered() { c.hover } else { c.field };
+        ui.painter().rect_filled(rect, 6., fill);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            FontId::monospace(14.),
+            c.ink,
+        );
+        r.on_hover_cursor(egui::CursorIcon::PointingHand)
+    };
+    let h = field(ui, format!("{:02}", *hour));
+    ui.add_sized([12., height], egui::Label::new(RichText::new(":").strong()));
+    let m = field(ui, format!("{:02}", *minute));
+    // Two half-height arrows stuck to the minute box: ±1 minute.
+    let (spin, _) = ui.allocate_exact_size(Vec2::new(18., height), Sense::hover());
+    for (k, up) in [(0., true), (1., false)] {
+        let r = Rect::from_min_size(
+            spin.min + Vec2::new(1., k * height / 2.),
+            Vec2::new(17., height / 2.),
+        );
+        let resp = ui
+            .interact(r, popup.with(("spin", up)), Sense::click())
+            .on_hover_text(if up {
+                "1분 늘리기"
+            } else {
+                "1분 줄이기"
+            });
+        ui.painter().rect_filled(
+            r.shrink(0.5),
+            3.,
+            if resp.hovered() { c.hover } else { c.field },
+        );
+        crate::icons::paint_icon(
+            ui.painter(),
+            Rect::from_center_size(r.center(), Vec2::splat(9.)),
+            if up {
+                Icon::ChevronUp
+            } else {
+                Icon::ChevronDown
+            },
+            c.muted,
+        );
+        if resp.clicked() {
+            (*hour, *minute) = step_minutes(*hour, *minute, if up { 1 } else { -1 });
+        }
+    }
+    if h.clicked() || m.clicked() {
+        ui.memory_mut(|mem| mem.toggle_popup(popup));
+    }
+    let anchor = h.union(m);
+    egui::popup_below_widget(
+        ui,
+        popup,
+        &anchor,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            ui.set_width(6. * 38.);
+            ui.spacing_mut().item_spacing = Vec2::new(2., 2.);
+            caption(ui, "시");
+            let mut close = false;
+            egui::Grid::new(popup.with("hours"))
+                .spacing([2., 2.])
+                .show(ui, |ui| {
+                    for v in 0..24u32 {
+                        if pick_cell(ui, v == *hour, format!("{v:02}")).clicked() {
+                            *hour = v;
+                        }
+                        if v % 6 == 5 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            ui.add_space(6.);
+            caption(ui, "분");
+            egui::Grid::new(popup.with("minutes"))
+                .spacing([2., 2.])
+                .show(ui, |ui| {
+                    for k in 0..12u32 {
+                        let v = k * 5;
+                        if pick_cell(ui, v == *minute, format!("{v:02}")).clicked() {
+                            *minute = v;
+                            close = true;
+                        }
+                        if k % 6 == 5 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            if close {
+                ui.memory_mut(|mem| mem.close_popup());
+            }
+        },
+    );
+}
+fn pick_cell(ui: &mut Ui, selected: bool, text: String) -> Response {
+    let c = t(ui);
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(36., 26.), Sense::click());
+    let fill = if selected {
+        ACCENT
+    } else if r.hovered() {
+        c.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 6., fill);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        FontId::monospace(13.),
+        if selected { Color32::WHITE } else { c.ink },
+    );
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

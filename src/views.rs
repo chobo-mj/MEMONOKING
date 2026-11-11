@@ -33,6 +33,9 @@ impl App {
             if ui::pill(ui, self.extra.created_basis, "생성일 기준").clicked() {
                 self.extra.created_basis = !self.extra.created_basis;
             }
+            if ui::pill(ui, self.extra.show_done, "완료 메모 보기").clicked() {
+                self.extra.show_done = !self.extra.show_done;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui::primary(ui, "+ 새 메모").clicked() {
                     self.add_note(Some(match self.page {
@@ -51,13 +54,20 @@ impl App {
             2 => 54.,
             _ => 46.,
         };
+        // On 오늘의 할일 / 다음에 할일 a click shows the memo in the preview
+        // pane; the eye button beside the check opens it as a sticker.
+        let preview = matches!(self.page, 2 | 3);
+        let lead = if preview { 26. } else { 0. };
         ui.push_id((i, occurrence), |ui| {
             let (rect, row) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), height),
                 Sense::click_and_drag(),
             );
             let hovered = ui.rect_contains_pointer(rect);
-            if hovered {
+            let selected = preview && self.catalog.selected == Some(i);
+            if selected {
+                ui.painter().rect_filled(rect, 6., tone.accent_soft);
+            } else if hovered {
                 ui.painter()
                     .rect_filled(rect, 6., tone.hover.gamma_multiply(0.6));
             }
@@ -76,9 +86,22 @@ impl App {
                     );
                 }
             }
+            let mut toggle_sticker = false;
+            if preview {
+                let open = self.studio.windows.get(&i).is_some_and(|w| w.open);
+                let eye = Rect::from_center_size(
+                    egui::pos2(rect.left() + 30., rect.top() + 15.),
+                    Vec2::splat(24.),
+                );
+                toggle_sticker = ui
+                    .put(eye, |ui: &mut egui::Ui| {
+                        icons::toggle_icon(ui, icons::Icon::Eye, "스티커 표시 / 숨기기", open)
+                    })
+                    .clicked();
+            }
             let mut d = self.data.notes[i].done_on(occurrence);
             let check = Rect::from_center_size(
-                egui::pos2(rect.left() + 30., rect.top() + 15.),
+                egui::pos2(rect.left() + 30. + lead, rect.top() + 15.),
                 Vec2::splat(20.),
             );
             if ui
@@ -94,7 +117,7 @@ impl App {
             } else {
                 n.title.clone()
             };
-            let text_left = rect.left() + 48.;
+            let text_left = rect.left() + 48. + lead;
             let actions = if hovered || n.starred { 64. } else { 0. };
             let title_font = egui::TextStyle::Body.resolve(ui.style());
             let mut job = egui::text::LayoutJob::single_section(
@@ -199,12 +222,21 @@ impl App {
                 let n = &mut self.data.notes[i];
                 n.starred = !n.starred;
             }
-            if edit || row.clicked() {
-                self.open_note_on(i, occurrence);
+            if toggle_sticker {
+                self.toggle_sticker(i);
+            } else if edit {
+                self.open_editor_on(i, occurrence);
+            } else if row.clicked() {
+                if preview {
+                    self.catalog.selected = Some(i);
+                    self.catalog.selected_day = occurrence;
+                } else {
+                    self.open_note_on(i, occurrence);
+                }
             }
             row.context_menu(|ui| {
                 if ui.button("편집창 열기").clicked() {
-                    self.open_note_on(i, occurrence);
+                    self.open_editor_on(i, occurrence);
                     ui.close_menu();
                 }
                 if ui.button("스티커로 꺼내기").clicked() {
@@ -243,6 +275,66 @@ impl App {
             }
         });
     }
+    /// 오늘의 할일 / 다음에 할일: the memo list with the preview pane on the
+    /// right, where the selected memo is read and edited.
+    pub fn agenda_preview(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.available_rect_before_wrap();
+        let height = rect.height();
+        let preview_max = (rect.width() - 360.).max(260.);
+        let preview_width = self
+            .catalog
+            .preview_width
+            .max(380.)
+            .clamp(260., preview_max);
+        let list_rect = Rect::from_min_size(
+            rect.min,
+            Vec2::new((rect.width() - preview_width - 16.).max(200.), height),
+        );
+        let preview_rect = Rect::from_min_size(
+            egui::pos2(list_rect.right() + 16., rect.top()),
+            Vec2::new(preview_width, height),
+        );
+        let mut list = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("agenda_list_pane")
+                .max_rect(list_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        list.set_clip_rect(ui.clip_rect().intersect(list_rect));
+        egui::ScrollArea::vertical()
+            .id_salt(("page_scroll", self.page))
+            .auto_shrink([false, false])
+            .show(&mut list, |ui| {
+                ui.set_min_width((ui.available_width() - 8.).max(200.));
+                self.agenda(ui, self.page);
+            });
+        let handle = Rect::from_min_max(
+            egui::pos2(list_rect.right() + 2., rect.top()),
+            egui::pos2(list_rect.right() + 14., rect.bottom()),
+        );
+        let drag = ui
+            .interact(handle, ui.id().with("agenda_splitter"), Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if drag.hovered() || drag.dragged() {
+            ui.painter().line_segment(
+                [handle.center_top(), handle.center_bottom()],
+                Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.6)),
+            );
+        }
+        if drag.dragged() {
+            self.catalog.preview_width =
+                (preview_width - drag.drag_delta().x).clamp(260., preview_max);
+        }
+        let mut preview = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("agenda_preview_pane")
+                .max_rect(preview_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        preview.set_clip_rect(ui.clip_rect().intersect(preview_rect));
+        self.catalog_preview(&mut preview, height);
+        ui.allocate_rect(rect, Sense::hover());
+    }
     pub fn agenda(&mut self, ui: &mut egui::Ui, mode: usize) {
         if !self.split && mode == 0 {
             self.detail_workspace(ui, mode);
@@ -255,7 +347,10 @@ impl App {
         for (i, n) in self.data.notes.iter().enumerate() {
             if !self.matches_search(i)
                 || (self.desktop.hide_locked && n.locked)
-                || (self.desktop.hide_completed && n.done && !self.extra.search_mode)
+                || (self.desktop.hide_completed
+                    && n.done
+                    && !self.extra.search_mode
+                    && !self.extra.show_done)
                 || (!self.recurring && n.recurring)
                 || !crate::refinements::project_match(self.project_filter, n.project)
             {

@@ -45,6 +45,11 @@ pub enum Icon {
     Trash,
     Arrange,
     ChevronDown,
+    ChevronUp,
+    Check,
+    Eye,
+    Bell,
+    Restore2,
 }
 
 /// An icon-only control with a consistent hit area, keyboard focus and a spoken label.
@@ -182,207 +187,251 @@ pub fn text_button(ui: &mut Ui, icon: Icon, label: &str, tooltip: &str) -> Respo
 }
 
 /// Draw an icon into any rectangle. Geometry uses a 24 by 24 design grid.
+/// Strokes get round caps and joins (small discs at every vertex) so the
+/// line icons read cleanly at 12–20 px; everything is vector, no images.
 pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let scale = rect.width().min(rect.height()) / 24.0;
     let origin = rect.center() - Vec2::splat(12.0 * scale);
     let p = |x: f32, y: f32| origin + Vec2::new(x, y) * scale;
-    let stroke = Stroke::new((1.55 * scale).max(1.0), color);
+    let width = (1.7 * scale).max(1.0);
+    let stroke = Stroke::new(width, color);
+    let cap = |q: Pos2| {
+        painter.circle_filled(q, width / 2., color);
+    };
     let line = |a: (f32, f32), b: (f32, f32)| {
         painter.line_segment([p(a.0, a.1), p(b.0, b.1)], stroke);
+        cap(p(a.0, a.1));
+        cap(p(b.0, b.1));
     };
     let path = |points: &[(f32, f32)]| {
-        painter.add(Shape::line(
-            points.iter().map(|&(x, y)| p(x, y)).collect(),
-            stroke,
-        ));
+        let pts: Vec<Pos2> = points.iter().map(|&(x, y)| p(x, y)).collect();
+        for &q in &pts {
+            cap(q);
+        }
+        painter.add(Shape::line(pts, stroke));
     };
-    let box_outline = |a: (f32, f32), b: (f32, f32), radius: f32| {
+    let closed = |points: &[(f32, f32)]| {
+        let pts: Vec<Pos2> = points.iter().map(|&(x, y)| p(x, y)).collect();
+        for &q in &pts {
+            cap(q);
+        }
+        painter.add(Shape::closed_line(pts, stroke));
+    };
+    let arc = |c: (f32, f32), r: f32, from: f32, to: f32| {
+        let n = 18;
+        let pts: Vec<Pos2> = (0..=n)
+            .map(|k| {
+                let a = (from + (to - from) * k as f32 / n as f32).to_radians();
+                p(c.0 + r * a.cos(), c.1 + r * a.sin())
+            })
+            .collect();
+        cap(pts[0]);
+        cap(pts[n]);
+        painter.add(Shape::line(pts, stroke));
+    };
+    let ring = |c: (f32, f32), r: f32| {
+        painter.circle_stroke(p(c.0, c.1), r * scale, stroke);
+    };
+    let dot = |c: (f32, f32), r: f32| {
+        painter.circle_filled(p(c.0, c.1), r * scale, color);
+    };
+    let rounded = |a: (f32, f32), b: (f32, f32), radius: f32| {
         painter.rect_stroke(
             Rect::from_min_max(p(a.0, a.1), p(b.0, b.1)),
             radius * scale,
             stroke,
-            StrokeKind::Inside,
+            StrokeKind::Middle,
         );
     };
     match icon {
-        Icon::Maximize => box_outline((4., 4.), (20., 20.), 1.5),
-        Icon::Restore => {
-            box_outline((4., 8.), (16., 20.), 1.);
-            path(&[(8., 8.), (8., 4.), (20., 4.), (20., 16.), (16., 16.)]);
-        }
-        Icon::Star => path(&[
-            (12., 3.),
-            (14.8, 8.7),
-            (21., 9.5),
-            (16.5, 14.),
-            (17.7, 20.5),
-            (12., 17.4),
-            (6.3, 20.5),
-            (7.5, 14.),
-            (3., 9.5),
-            (9.2, 8.7),
-            (12., 3.),
-        ]),
-        Icon::Opacity => {
-            painter.circle_stroke(p(12., 12.), 9. * scale, stroke);
-            path(&[(12., 3.), (12., 21.)]);
-            for x in [14., 16., 18.] {
-                line((x, 6. + (x - 14.) * 0.8), (x, 18. - (x - 14.) * 0.8));
-            }
-        }
-        Icon::Menu => {
-            line((4., 6.), (20., 6.));
-            line((4., 12.), (20., 12.));
-            line((4., 18.), (20., 18.));
-        }
-        Icon::Alarm => {
-            painter.circle_stroke(p(12., 13.), 7. * scale, stroke);
-            line((12., 8.), (12., 13.));
-            line((12., 13.), (16., 15.));
-            line((4., 5.), (7., 3.));
-            line((17., 3.), (20., 5.));
-            line((7., 20.), (5., 22.));
-            line((17., 20.), (19., 22.));
-        }
-        Icon::Palette => {
-            painter.circle_stroke(p(12., 12.), 9. * scale, stroke);
-            for (x, y) in [(8., 7.), (15., 7.), (7., 13.), (16., 14.)] {
-                painter.circle_filled(p(x, y), 1.3 * scale, color);
-            }
-        }
-        Icon::Lock => {
-            box_outline((5., 10.), (19., 21.), 2.);
-            path(&[
-                (8., 10.),
-                (8., 6.),
-                (10., 3.),
-                (14., 3.),
-                (16., 6.),
-                (16., 10.),
-            ]);
-            line((12., 14.), (12., 17.));
-        }
         Icon::Close => {
             line((6.5, 6.5), (17.5, 17.5));
             line((17.5, 6.5), (6.5, 17.5));
         }
+        Icon::Plus => {
+            line((5.5, 12.), (18.5, 12.));
+            line((12., 5.5), (12., 18.5));
+        }
+        Icon::Minus => line((5.5, 12.), (18.5, 12.)),
+        Icon::Check => path(&[(5., 12.5), (9.8, 17.), (19., 7.)]),
+        Icon::ChevronDown => path(&[(6., 9.5), (12., 15.5), (18., 9.5)]),
+        Icon::ChevronUp => path(&[(6., 14.5), (12., 8.5), (18., 14.5)]),
+        Icon::ChevronLeft => path(&[(14.5, 6.), (8.5, 12.), (14.5, 18.)]),
+        Icon::ChevronRight => path(&[(9.5, 6.), (15.5, 12.), (9.5, 18.)]),
         Icon::Help => {
-            painter.circle_stroke(p(12.0, 12.0), 9.0 * scale, stroke);
-            path(&[
-                (8.7, 8.0),
-                (9.7, 6.8),
-                (13.0, 6.8),
-                (15.2, 8.3),
-                (15.2, 10.0),
-                (12.0, 12.3),
-                (12.0, 13.5),
-            ]);
-            painter.circle_filled(p(12.0, 17.0), 0.9 * scale, color);
+            ring((12., 12.), 9.);
+            arc((12., 9.6), 2.6, 190., 395.);
+            path(&[(13.9, 11.4), (12., 12.8), (12., 13.8)]);
+            dot((12., 16.9), 1.05);
         }
         Icon::Edit => {
-            path(&[
-                (4.5, 19.5),
-                (6.0, 14.3),
-                (16.3, 4.0),
-                (20.0, 7.7),
-                (9.7, 18.0),
-                (4.5, 19.5),
+            closed(&[
+                (5., 19.),
+                (5.8, 15.2),
+                (15.6, 5.4),
+                (18.6, 8.4),
+                (8.8, 18.2),
             ]);
-            line((14.8, 5.5), (18.5, 9.2));
-            line((6.0, 14.3), (9.7, 18.0));
+            line((13.6, 7.4), (16.6, 10.4));
         }
-        Icon::Plus => {
-            line((5.0, 12.0), (19.0, 12.0));
-            line((12.0, 5.0), (12.0, 19.0));
-        }
-        Icon::Minus => line((5.0, 12.0), (19.0, 12.0)),
         Icon::Fold => {
-            path(&[(6.0, 8.0), (12.0, 14.0), (18.0, 8.0)]);
-            line((6.0, 19.0), (18.0, 19.0));
+            path(&[(7., 8.), (12., 13.), (17., 8.)]);
+            line((6., 18.), (18., 18.));
         }
         Icon::Sticky => {
-            path(&[
-                (4.0, 3.0),
-                (20.0, 3.0),
-                (20.0, 15.0),
-                (14.0, 21.0),
-                (4.0, 21.0),
-                (4.0, 3.0),
-            ]);
-            path(&[(14.0, 21.0), (14.0, 15.0), (20.0, 15.0)]);
-            line((8.0, 8.0), (16.0, 8.0));
-            line((8.0, 11.5), (14.0, 11.5));
+            closed(&[(5., 4.5), (19., 4.5), (19., 14.), (14., 19.5), (5., 19.5)]);
+            path(&[(14., 19.5), (14., 14.), (19., 14.)]);
+        }
+        Icon::StickyPlus => {
+            closed(&[(5., 4.5), (19., 4.5), (19., 14.), (14., 19.5), (5., 19.5)]);
+            path(&[(14., 19.5), (14., 14.), (19., 14.)]);
+            line((9., 9.5), (14., 9.5));
+            line((11.5, 7.), (11.5, 12.));
         }
         Icon::Search => {
-            painter.circle_stroke(p(10.0, 10.0), 5.7 * scale, stroke);
-            line((14.3, 14.3), (20.0, 20.0));
+            ring((10.8, 10.8), 6.3);
+            line((15.5, 15.5), (19.5, 19.5));
         }
-        Icon::Calendar => {
-            box_outline((3.0, 5.0), (21.0, 21.0), 2.0);
-            line((3.0, 10.0), (21.0, 10.0));
-            line((8.0, 3.0), (8.0, 7.5));
-            line((16.0, 3.0), (16.0, 7.5));
-            for (x, y) in [(8.0, 14.0), (14.0, 14.0), (8.0, 17.5)] {
-                painter.rect_filled(
-                    Rect::from_center_size(p(x, y), Vec2::splat(1.9 * scale)),
-                    0.3,
-                    color,
-                );
+        Icon::Calendar | Icon::Upcoming | Icon::Today => {
+            rounded((4., 5.5), (20., 20.), 2.5);
+            line((8.5, 3.5), (8.5, 7.));
+            line((15.5, 3.5), (15.5, 7.));
+            match icon {
+                Icon::Today => {
+                    painter.text(
+                        p(12., 14.3),
+                        egui::Align2::CENTER_CENTER,
+                        chrono::Local::now().format("%-d").to_string(),
+                        egui::FontId::proportional(8.5 * scale),
+                        color,
+                    );
+                }
+                Icon::Upcoming => {
+                    line((4., 10.), (20., 10.));
+                    path(&[(10.5, 12.5), (13.5, 15.), (10.5, 17.5)]);
+                }
+                _ => {
+                    line((4., 10.), (20., 10.));
+                    for (x, y) in [(8.5, 13.8), (12., 13.8), (15.5, 13.8), (8.5, 17.)] {
+                        dot((x, y), 0.95);
+                    }
+                }
             }
         }
         Icon::Folder => {
-            path(&[
-                (3.0, 7.0),
-                (3.0, 20.0),
-                (21.0, 20.0),
-                (21.0, 7.0),
-                (12.0, 7.0),
-                (10.0, 4.0),
-                (3.0, 4.0),
-                (3.0, 7.0),
+            closed(&[
+                (3.5, 6.5),
+                (3.5, 18.5),
+                (20.5, 18.5),
+                (20.5, 8.5),
+                (12., 8.5),
+                (10., 5.),
+                (4.5, 5.),
             ]);
         }
         Icon::Settings => {
-            let mut points: Vec<Pos2> = (0..32)
-                .map(|i| {
-                    let angle = i as f32 * std::f32::consts::TAU / 32.0;
-                    let radius = if i % 4 < 2 { 9.3 } else { 7.1 };
-                    p(12.0 + angle.cos() * radius, 12.0 + angle.sin() * radius)
+            ring((12., 12.), 2.8);
+            ring((12., 12.), 6.6);
+            for k in 0..8 {
+                let a = (k as f32 * 45.).to_radians();
+                line(
+                    (12. + 6.6 * a.cos(), 12. + 6.6 * a.sin()),
+                    (12. + 8.9 * a.cos(), 12. + 8.9 * a.sin()),
+                );
+            }
+        }
+        Icon::Pin => {
+            closed(&[
+                (9., 4.),
+                (15., 4.),
+                (14.2, 9.),
+                (17., 12.5),
+                (7., 12.5),
+                (9.8, 9.),
+            ]);
+            line((12., 12.5), (12., 20.));
+        }
+        Icon::Alarm => {
+            ring((12., 13.), 7.3);
+            path(&[(12., 9.3), (12., 13.), (14.6, 14.6)]);
+            line((4.2, 6.2), (6.8, 3.8));
+            line((19.8, 6.2), (17.2, 3.8));
+        }
+        Icon::Palette => {
+            ring((12., 12.), 8.8);
+            for (x, y) in [(8.3, 9.), (12., 7.2), (15.7, 9.), (8.6, 13.4)] {
+                dot((x, y), 1.25);
+            }
+            ring((14.6, 14.6), 1.9);
+        }
+        Icon::Lock => {
+            rounded((5., 11.), (19., 20.), 2.2);
+            arc((12., 8.), 3.8, 180., 360.);
+            line((8.2, 8.), (8.2, 11.));
+            line((15.8, 8.), (15.8, 11.));
+            dot((12., 15.5), 1.2);
+        }
+        Icon::Maximize => rounded((5., 5.), (19., 19.), 2.2),
+        Icon::Restore => {
+            rounded((5., 9.), (15., 19.), 2.);
+            path(&[
+                (9., 6.5),
+                (9.5, 5.),
+                (17., 5.),
+                (19., 7.),
+                (19., 14.5),
+                (17.5, 15.),
+            ]);
+        }
+        Icon::Star => closed(&[
+            (12., 3.8),
+            (14.5, 8.9),
+            (20., 9.6),
+            (16., 13.4),
+            (17., 18.9),
+            (12., 16.3),
+            (7., 18.9),
+            (8., 13.4),
+            (4., 9.6),
+            (9.5, 8.9),
+        ]),
+        Icon::Opacity => {
+            ring((12., 12.), 8.3);
+            let half: Vec<Pos2> = (0..=18)
+                .map(|k| {
+                    let a = (90. + 180. * k as f32 / 18.).to_radians();
+                    p(12. + 8.3 * a.cos(), 12. + 8.3 * a.sin())
                 })
                 .collect();
-            points.push(points[0]);
-            painter.add(Shape::line(points, stroke));
-            painter.circle_stroke(p(12.0, 12.0), 3.0 * scale, stroke);
+            painter.add(Shape::convex_polygon(half, color, Stroke::NONE));
         }
-        Icon::ChevronDown => path(&[(5.5, 9.5), (12., 16.), (18.5, 9.5)]),
-        Icon::ChevronLeft => path(&[(14.5, 5.5), (8.0, 12.0), (14.5, 18.5)]),
-        Icon::ChevronRight => path(&[(9.5, 5.5), (16.0, 12.0), (9.5, 18.5)]),
+        Icon::Menu => {
+            line((4.5, 7.), (19.5, 7.));
+            line((4.5, 12.), (19.5, 12.));
+            line((4.5, 17.), (19.5, 17.));
+        }
         Icon::Sidebar => {
-            box_outline((3., 4.), (21., 20.), 2.5);
-            line((9., 4.), (9., 20.));
+            rounded((3.5, 4.5), (20.5, 19.5), 2.5);
+            line((9.5, 4.5), (9.5, 19.5));
         }
         Icon::Detach => {
-            box_outline((3., 6.), (17., 20.), 2.);
-            path(&[(13., 3.), (21., 3.), (21., 11.)]);
-            line((21., 3.), (12., 12.));
-        }
-        Icon::StickyPlus => {
+            path(&[(14., 4.), (20., 4.), (20., 10.)]);
+            line((20., 4.), (11.5, 12.5));
             path(&[
-                (4., 4.),
-                (20., 4.),
-                (20., 14.),
-                (14., 20.),
-                (4., 20.),
-                (4., 4.),
+                (17.5, 13.5),
+                (17.5, 18.),
+                (16., 19.5),
+                (6., 19.5),
+                (4.5, 18.),
+                (4.5, 8.),
+                (6., 6.5),
+                (10.5, 6.5),
             ]);
-            path(&[(14., 20.), (14., 14.), (20., 14.)]);
-            line((8., 10.), (14., 10.));
-            line((11., 7.), (11., 13.));
         }
         Icon::Filter => {
-            line((4., 7.), (20., 7.));
-            line((7., 12.), (17., 12.));
-            line((10., 17.), (14., 17.));
+            line((4.5, 7.), (19.5, 7.));
+            line((7.5, 12.), (16.5, 12.));
+            line((10.5, 17.), (13.5, 17.));
         }
         Icon::PlusCircle => {
             painter.circle_filled(p(12., 12.), 9.5 * scale, crate::ui::ACCENT);
@@ -391,90 +440,89 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
             painter.line_segment([p(12., 8.), p(12., 16.)], s);
         }
         Icon::Home => {
-            path(&[(4., 11.), (12., 4.), (20., 11.)]);
-            path(&[(6., 9.5), (6., 20.), (18., 20.), (18., 9.5)]);
-            line((10., 20.), (10., 15.));
-            line((14., 20.), (14., 15.));
-            line((10., 15.), (14., 15.));
-        }
-        Icon::Today => {
-            box_outline((3.5, 5.), (20.5, 20.5), 2.5);
-            line((8., 3.), (8., 7.));
-            line((16., 3.), (16., 7.));
-            painter.text(
-                p(12., 14.2),
-                egui::Align2::CENTER_CENTER,
-                chrono::Local::now().format("%-d").to_string(),
-                egui::FontId::proportional(8.5 * scale),
-                color,
-            );
-        }
-        Icon::Upcoming => {
-            box_outline((3.5, 5.), (20.5, 20.5), 2.5);
-            line((3.5, 10.), (20.5, 10.));
-            line((8., 3.), (8., 7.));
-            line((16., 3.), (16., 7.));
-            path(&[(10., 13.), (13., 15.5), (10., 18.)]);
+            path(&[(4., 11.), (12., 4.5), (20., 11.)]);
+            path(&[(6.5, 9.5), (6.5, 19.5), (17.5, 19.5), (17.5, 9.5)]);
+            path(&[(10., 19.5), (10., 14.5), (14., 14.5), (14., 19.5)]);
         }
         Icon::Notes => {
-            box_outline((4., 3.), (20., 21.), 2.5);
-            line((8., 8.), (16., 8.));
-            line((8., 12.), (16., 12.));
-            line((8., 16.), (13., 16.));
+            rounded((5., 3.5), (19., 20.5), 2.5);
+            line((8.5, 8.5), (15.5, 8.5));
+            line((8.5, 12.), (15.5, 12.));
+            line((8.5, 15.5), (12.5, 15.5));
         }
         Icon::Book => {
-            path(&[
-                (12., 6.),
-                (8., 4.5),
-                (3.5, 4.5),
-                (3.5, 18.5),
-                (8., 18.5),
-                (12., 20.),
+            closed(&[
+                (12., 6.5),
+                (8.5, 5.),
+                (4., 5.),
+                (4., 18.),
+                (8.5, 18.),
+                (12., 19.5),
             ]);
-            path(&[
-                (12., 6.),
-                (16., 4.5),
-                (20.5, 4.5),
-                (20.5, 18.5),
-                (16., 18.5),
-                (12., 20.),
+            closed(&[
+                (12., 6.5),
+                (15.5, 5.),
+                (20., 5.),
+                (20., 18.),
+                (15.5, 18.),
+                (12., 19.5),
             ]);
-            line((12., 6.), (12., 20.));
         }
         Icon::Grid => {
-            for (x, y) in [(4., 4.), (13., 4.), (4., 13.), (13., 13.)] {
-                box_outline((x, y), (x + 7., y + 7.), 1.8);
+            for (x, y) in [(4.5, 4.5), (13., 4.5), (4.5, 13.), (13., 13.)] {
+                rounded((x, y), (x + 6.5, y + 6.5), 1.6);
             }
         }
         Icon::More => {
             for x in [6., 12., 18.] {
-                painter.circle_filled(p(x, 12.), 1.5 * scale, color);
+                dot((x, 12.), 1.55);
             }
         }
         Icon::Trash => {
-            line((4., 7.), (20., 7.));
-            path(&[(9., 7.), (9., 4.), (15., 4.), (15., 7.)]);
-            path(&[(6., 7.), (7., 20.), (17., 20.), (18., 7.)]);
-            line((10., 11.), (10., 16.));
-            line((14., 11.), (14., 16.));
+            line((4.5, 7.), (19.5, 7.));
+            path(&[(9.5, 7.), (9.5, 4.5), (14.5, 4.5), (14.5, 7.)]);
+            path(&[(6.5, 7.), (7.3, 19.5), (16.7, 19.5), (17.5, 7.)]);
+            line((10.3, 11.), (10.3, 16.));
+            line((13.7, 11.), (13.7, 16.));
+        }
+        Icon::Eye => {
+            let lid = |sign: f32| -> Vec<(f32, f32)> {
+                (0..=16)
+                    .map(|k| {
+                        let t = k as f32 / 16.;
+                        let x = 2.5 + 19. * t;
+                        (x, 12. + sign * 6.2 * (std::f32::consts::PI * t).sin())
+                    })
+                    .collect()
+            };
+            path(&lid(-1.));
+            path(&lid(1.));
+            ring((12., 12.), 2.9);
+        }
+        Icon::Bell => {
+            path(&[
+                (6., 16.5),
+                (6., 11.),
+                (7.2, 7.4),
+                (9.6, 5.4),
+                (12., 4.8),
+                (14.4, 5.4),
+                (16.8, 7.4),
+                (18., 11.),
+                (18., 16.5),
+            ]);
+            line((4.5, 16.5), (19.5, 16.5));
+            arc((12., 18.6), 2., 0., 180.);
+        }
+        Icon::Restore2 => {
+            arc((12.5, 12.5), 7.5, 200., 520.);
+            path(&[(4.2, 5.5), (4.6, 10.), (9., 9.6)]);
         }
         Icon::Arrange => {
-            box_outline((3., 4.), (10., 10.), 1.5);
-            box_outline((3., 14.), (10., 20.), 1.5);
-            line((14., 7.), (21., 7.));
-            line((14., 17.), (21., 17.));
-        }
-        Icon::Pin => {
-            path(&[
-                (8.0, 4.0),
-                (16.0, 4.0),
-                (15.0, 8.0),
-                (18.0, 12.0),
-                (6.0, 12.0),
-                (9.0, 8.0),
-                (8.0, 4.0),
-            ]);
-            line((12.0, 12.0), (12.0, 21.0));
+            rounded((4., 4.5), (10.5, 10.5), 1.6);
+            rounded((4., 13.5), (10.5, 19.5), 1.6);
+            line((14., 7.5), (20., 7.5));
+            line((14., 16.5), (20., 16.5));
         }
     }
 }

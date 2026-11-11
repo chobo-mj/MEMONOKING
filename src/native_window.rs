@@ -437,6 +437,52 @@ pub fn work_area(ctx: &egui::Context) -> Option<Rect> {
             .map(|size| Rect::from_min_size(Pos2::ZERO, size))
     })
 }
+/// Work areas of all monitors in points, in the order Windows reports them
+/// (the primary monitor first). Empty where monitors cannot be listed.
+pub fn monitors(ctx: &egui::Context) -> Vec<Rect> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{BOOL, LPARAM, RECT},
+            Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
+        };
+        unsafe extern "system" fn visit(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+            let out = &mut *(data as *mut Vec<(bool, RECT)>);
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(m, &mut info) != 0 {
+                // MONITORINFOF_PRIMARY = 1
+                out.push((info.dwFlags & 1 != 0, info.rcWork));
+            }
+            1
+        }
+        let mut found: Vec<(bool, RECT)> = Vec::new();
+        // SAFETY: the callback only writes into `found`, which outlives the call.
+        unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(visit),
+                &mut found as *mut _ as LPARAM,
+            );
+        }
+        found.sort_by_key(|(primary, r)| (!primary, r.left, r.top));
+        let scale = ctx.pixels_per_point();
+        found
+            .into_iter()
+            .map(|(_, r)| {
+                Rect::from_min_max(
+                    Pos2::new(r.left as f32 / scale, r.top as f32 / scale),
+                    Pos2::new(r.right as f32 / scale, r.bottom as f32 / scale),
+                )
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        work_area(ctx).into_iter().collect()
+    }
+}
 pub fn fit_position(position: Pos2, size: Vec2, area: Rect) -> Pos2 {
     Pos2::new(
         position

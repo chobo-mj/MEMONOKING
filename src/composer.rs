@@ -291,6 +291,18 @@ pub fn show(
     doc: &mut Document,
     id: impl Hash,
 ) -> egui::Response {
+    show_with(ui, legacy_body, doc, id, 0.)
+}
+/// Like [`show`] for panes inside the main window: no window-opacity tool,
+/// and `trailing_space` kept free at the right of the tool row for the
+/// caller's own buttons.
+pub fn show_with(
+    ui: &mut egui::Ui,
+    legacy_body: &mut String,
+    doc: &mut Document,
+    id: impl Hash,
+    trailing_space: f32,
+) -> egui::Response {
     let id = ui.make_persistent_id(id);
     let top = ui.cursor().min;
     let bottom = ui.clip_rect().bottom().min(ui.ctx().screen_rect().bottom());
@@ -306,7 +318,7 @@ pub fn show(
             .max_rect(bounds)
             .layout(egui::Layout::bottom_up(egui::Align::Min)),
     );
-    render_footer(&mut footer_ui, doc, id, 0., true, true);
+    render_footer(&mut footer_ui, doc, id, trailing_space, true, true, false);
     let content_bottom =
         (footer_ui.min_rect().top() - ui.spacing().item_spacing.y).max(bounds.top());
     let content_rect =
@@ -340,7 +352,7 @@ pub fn footer(
     divider: bool,
 ) -> egui::Response {
     let id = ui.make_persistent_id(id);
-    render_footer(ui, doc, id, trailing_space, false, divider)
+    render_footer(ui, doc, id, trailing_space, false, divider, true)
 }
 fn content_impl(
     ui: &mut egui::Ui,
@@ -969,6 +981,7 @@ fn render_footer(
     trailing_space: f32,
     bottom_up: bool,
     divider: bool,
+    opacity: bool,
 ) -> egui::Response {
     if doc.tabs.is_empty() {
         doc.tabs.push(Tab::new("본문".into()));
@@ -991,7 +1004,7 @@ fn render_footer(
         let tools = |ui: &mut egui::Ui, doc: &mut Document| {
             ui.scope(|ui| {
                 ui.set_max_width((ui.available_width() - trailing_space.max(0.)).max(28.));
-                toolbar(ui, doc, id);
+                toolbar(ui, doc, id, opacity);
             });
         };
         let line = |ui: &mut egui::Ui| {
@@ -1040,14 +1053,18 @@ const TOOLS: [Tool; 7] = [
     Tool::Strike,
     Tool::Opacity,
 ];
-fn toolbar_height(width: f32) -> f32 {
-    let columns = (((width.max(28.) + 2.) / 30.).floor() as usize).clamp(1, TOOLS.len());
-    let rows = TOOLS.len().div_ceil(columns);
+fn toolbar_height(width: f32, count: usize) -> f32 {
+    let columns = (((width.max(28.) + 2.) / 30.).floor() as usize).clamp(1, count);
+    let rows = count.div_ceil(columns);
     rows as f32 * 28. + rows.saturating_sub(1) as f32 * 2.
 }
-fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
+fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id, opacity: bool) -> egui::Response {
     let width = ui.available_width().min(ui.clip_rect().width()).max(28.);
-    let height = toolbar_height(width);
+    let tools: Vec<Tool> = TOOLS
+        .into_iter()
+        .filter(|t| opacity || *t != Tool::Opacity)
+        .collect();
+    let height = toolbar_height(width, tools.len());
     ui.allocate_ui_with_layout(
         Vec2::new(width, height),
         egui::Layout::top_down(egui::Align::Min),
@@ -1056,7 +1073,7 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id) -> egui::Response {
             ui.spacing_mut().button_padding = Vec2::new(6., 4.);
             ui.set_max_width(ui.available_width().min(ui.clip_rect().width()).max(28.));
             ui.horizontal_wrapped(|ui| {
-                for tool in TOOLS {
+                for tool in tools {
                     let (label, selected) = match tool {
                         Tool::Font => (format!("글꼴 · {}", doc.font_name), false),
                         Tool::Size => {
@@ -2495,7 +2512,7 @@ mod tests {
                     egui::CentralPanel::default()
                         .frame(egui::Frame::NONE.inner_margin(14.))
                         .show(ctx, |ui| {
-                            height = toolbar(ui, &mut doc, Id::new("icon_toolbar_test"))
+                            height = toolbar(ui, &mut doc, Id::new("icon_toolbar_test"), true)
                                 .rect
                                 .height();
                         });
@@ -2512,7 +2529,7 @@ mod tests {
                 "closed toolbar contains a text control"
             );
             assert_eq!(
-                toolbar_height(width - 28.),
+                toolbar_height(width - 28., TOOLS.len()),
                 if width == 360. { 28. } else { 58. }
             );
         }
@@ -2601,7 +2618,8 @@ mod tests {
                         .show(ctx, |ui| {
                             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                                 bounds = ui.max_rect();
-                                tools = toolbar(ui, &mut doc, Id::new("inline_tools_bounds")).rect;
+                                tools = toolbar(ui, &mut doc, Id::new("inline_tools_bounds"), true)
+                                    .rect;
                             });
                         });
                 },

@@ -6,6 +6,17 @@ use std::ops::Range;
 
 type FindHit = (usize, Option<(usize, Range<usize>)>);
 
+/// One memo in the "모두 찾기" results: its title and the first body line
+/// containing the text, with the found text's byte range in each.
+#[derive(Clone, Debug)]
+struct FindResult {
+    note: usize,
+    title_hit: Option<Range<usize>>,
+    line: String,
+    line_hit: Option<Range<usize>>,
+    count: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Folder {
     pub title: String,
@@ -29,6 +40,15 @@ pub struct Catalog {
     pub replace_find: String,
     pub replace_with: String,
     pub replace_scope: usize,
+    /// Projects searched when the scope is "선택 프로젝트" (`NO_PROJECT`
+    /// stands for memos without one).
+    pub replace_projects: BTreeSet<usize>,
+    /// Index of the current "찾기" match.
+    replace_cursor: Option<usize>,
+    /// "모두 찾기" results shown in place of the preview.
+    pub results_open: bool,
+    results: Vec<FindResult>,
+    results_selected: BTreeSet<usize>,
     project: Option<usize>,
     sort: usize,
     recurring: usize,
@@ -207,75 +227,13 @@ fn action(ui: &mut egui::Ui, kind: Action, tooltip: &str, selected: bool) -> egu
         );
     }
     let c = if selected { ACCENT } else { MUTED };
-    let s = Stroke::new(1.35_f32, c);
-    let p = |x: f32, y: f32| rect.min + Vec2::new(x, y);
-    let line = |a: (f32, f32), b: (f32, f32)| {
-        ui.painter().line_segment([p(a.0, a.1), p(b.0, b.1)], s);
+    let icon = match kind {
+        Action::Eye => crate::icons::Icon::Eye,
+        Action::Bell => crate::icons::Icon::Bell,
+        Action::Trash => crate::icons::Icon::Trash,
+        Action::Restore => crate::icons::Icon::Restore2,
     };
-    match kind {
-        Action::Eye => {
-            ui.painter().add(egui::Shape::line(
-                vec![
-                    p(3., 13.),
-                    p(7., 8.),
-                    p(13., 6.),
-                    p(19., 8.),
-                    p(23., 13.),
-                    p(19., 18.),
-                    p(13., 20.),
-                    p(7., 18.),
-                    p(3., 13.),
-                ],
-                s,
-            ));
-            ui.painter().circle_stroke(p(13., 13.), 3.2, s);
-        }
-        Action::Bell => {
-            ui.painter().add(egui::Shape::line(
-                vec![
-                    p(5., 19.),
-                    p(8., 16.),
-                    p(8., 11.),
-                    p(9., 7.),
-                    p(13., 5.),
-                    p(17., 7.),
-                    p(18., 11.),
-                    p(18., 16.),
-                    p(21., 19.),
-                    p(5., 19.),
-                ],
-                s,
-            ));
-            line((11., 22.), (15., 22.));
-            line((13., 3.), (13., 5.));
-        }
-        Action::Trash => {
-            line((5., 7.), (21., 7.));
-            line((10., 4.), (16., 4.));
-            ui.painter().add(egui::Shape::line(
-                vec![p(7., 9.), p(8., 22.), p(18., 22.), p(19., 9.)],
-                s,
-            ));
-            line((11., 11.), (11., 19.));
-            line((15., 11.), (15., 19.));
-        }
-        Action::Restore => {
-            ui.painter().add(egui::Shape::line(
-                vec![
-                    p(7., 8.),
-                    p(13., 5.),
-                    p(20., 8.),
-                    p(22., 14.),
-                    p(19., 20.),
-                    p(12., 22.),
-                    p(7., 19.),
-                ],
-                s,
-            ));
-            line((4., 4.), (4., 11.));
-            line((4., 11.), (11., 11.));
-        }
-    }
+    crate::icons::paint_icon(ui.painter(), rect.shrink(4.), icon, c);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip)
 }
@@ -329,7 +287,7 @@ impl App {
                 vec![None]
             };
             for d in days {
-                if (self.desktop.hide_completed && n.done_on(d))
+                if (self.desktop.hide_completed && !self.extra.show_done && n.done_on(d))
                     || !match mode {
                         2 => d == Some(today),
                         3 => d.is_some_and(|d| d > today),
@@ -344,7 +302,9 @@ impl App {
         rows.sort_by_key(|&(i, d)| (d.unwrap_or(NaiveDate::MAX), self.data.notes[i].time, i));
         let ids: Vec<_> = rows.iter().map(|&(i, _)| i).collect();
         self.catalog_find_bar(ui, &ids);
-        self.catalog_split_list(ui, &rows, true, true);
+        // Title and body clicks only show the memo in the preview; the eye
+        // column opens it as a sticker.
+        self.catalog_split_list(ui, &rows, false, true);
         self.catalog_replace_window(ui.ctx());
     }
 
@@ -466,7 +426,10 @@ impl App {
             ui.add_space(64.);
             if ui.button("찾아 바꾸기").clicked() {
                 self.catalog.replace_open = true;
-                self.catalog.replace_find = self.catalog.query.clone();
+                if !self.catalog.query.is_empty() {
+                    self.catalog.replace_find = self.catalog.query.clone();
+                }
+                ui::raise(ui.ctx(), "catalog_replace");
             }
             slot
         });
@@ -1038,7 +1001,11 @@ impl App {
         }
     }
 
-    fn catalog_preview(&mut self, ui: &mut egui::Ui, height: f32) {
+    pub(crate) fn catalog_preview(&mut self, ui: &mut egui::Ui, height: f32) {
+        if self.catalog.results_open {
+            self.catalog_results(ui, height);
+            return;
+        }
         let Some(i) = self
             .catalog
             .selected
@@ -1657,24 +1624,30 @@ impl App {
             return;
         }
         let mut open = true;
-        let mut apply = false;
+        let mut command = None;
         let mut target = vec![];
         ui::dialog(
             ctx,
             "catalog_replace",
             "찾아 바꾸기",
-            [420., 330.],
+            [460., 420.],
             false,
             &mut open,
             |ui| {
                 ui.label(RichText::new("찾아 바꾸기").strong().size(15.));
                 ui.add_space(8.);
                 ui::field(ui, "찾을 내용", |ui| {
-                    ui.add(
+                    let r = ui.add(
                         egui::TextEdit::singleline(&mut self.catalog.replace_find)
                             .desired_width(f32::INFINITY)
                             .margin(egui::Margin::symmetric(8, 5)),
                     );
+                    if r.changed() {
+                        self.catalog.replace_cursor = None;
+                    }
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        command = Some(ReplaceCommand::FindNext);
+                    }
                 });
                 ui::field(ui, "바꿀 내용", |ui| {
                     ui.add(
@@ -1685,29 +1658,64 @@ impl App {
                 });
                 ui.add_space(6.);
                 ui::field(ui, "범위", |ui| {
-                    ui::segmented(
+                    if ui::segmented(
                         ui,
                         &mut self.catalog.replace_scope,
                         &["현재 메모", "선택 프로젝트", "전체 메모"],
-                    );
+                    ) {
+                        self.catalog.replace_cursor = None;
+                    }
+                });
+                if self.catalog.replace_scope == 1 && self.catalog.replace_projects.is_empty() {
+                    let current = self
+                        .catalog
+                        .selected
+                        .and_then(|i| self.data.notes[i].project)
+                        .unwrap_or(NO_PROJECT);
+                    self.catalog.replace_projects.insert(current);
+                }
+                ui::field(ui, "프로젝트", |ui| {
+                    ui.add_enabled_ui(self.catalog.replace_scope == 1, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            let mut choices = vec![(NO_PROJECT, "프로젝트 없음".to_string())];
+                            for (p, name) in self.data.projects.iter().enumerate() {
+                                if !self.extra.deleted_projects.contains(&p) {
+                                    choices.push((p, format!("# {name}")));
+                                }
+                            }
+                            for (p, name) in choices {
+                                let on = self.catalog.replace_projects.contains(&p);
+                                if ui::pill(ui, on, &name).clicked() {
+                                    if on {
+                                        self.catalog.replace_projects.remove(&p);
+                                    } else {
+                                        self.catalog.replace_projects.insert(p);
+                                    }
+                                    self.catalog.replace_cursor = None;
+                                }
+                            }
+                        });
+                    });
                 });
                 target = self.catalog_replace_targets();
                 ui.label(
                     RichText::new(format!(
-                        "{}개 메모에 적용 · 잠긴 메모와 휴지통 제외",
+                        "{}개 메모에서 찾음 · 잠긴 메모와 휴지통 제외",
                         target.len()
                     ))
                     .small()
                     .color(MUTED),
                 );
-                ui.add_space(6.);
+                ui.add_space(4.);
                 if !self.catalog.replace_message.is_empty() {
                     ui.label(RichText::new(&self.catalog.replace_message).color(ACCENT));
                 }
+                ui.add_space(4.);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let any = !target.is_empty();
                     if ui
                         .add_enabled(
-                            !target.is_empty(),
+                            any,
                             egui::Button::new(
                                 RichText::new("모두 바꾸기").color(Color32::WHITE).strong(),
                             )
@@ -1715,15 +1723,337 @@ impl App {
                         )
                         .clicked()
                     {
-                        apply = true;
+                        command = Some(ReplaceCommand::ReplaceAll);
+                    }
+                    if ui.add_enabled(any, egui::Button::new("바꾸기")).clicked() {
+                        command = Some(ReplaceCommand::Replace);
+                    }
+                    if ui
+                        .add_enabled(any, egui::Button::new("모두 찾기"))
+                        .clicked()
+                    {
+                        command = Some(ReplaceCommand::FindAll);
+                    }
+                    if ui.add_enabled(any, egui::Button::new("찾기")).clicked() {
+                        command = Some(ReplaceCommand::FindNext);
                     }
                 });
             },
         );
         self.catalog.replace_open = open;
-        if apply {
-            self.catalog_apply_replacement(&target);
-            self.catalog.replace_message = format!("{}개 메모를 변경했습니다", target.len());
+        match command {
+            Some(ReplaceCommand::FindNext) => self.replace_find_next(&target),
+            Some(ReplaceCommand::Replace) => {
+                self.replace_current(&target);
+            }
+            Some(ReplaceCommand::FindAll) => self.replace_find_all(&target),
+            Some(ReplaceCommand::ReplaceAll) => {
+                let count = self.replace_count(&target);
+                self.catalog_apply_replacement(&target);
+                self.catalog.replace_cursor = None;
+                self.catalog.replace_message =
+                    format!("{}개 메모에서 {count}곳을 바꿨습니다", target.len());
+                if self.catalog.results_open {
+                    let target = self.catalog_replace_targets();
+                    self.replace_find_all(&target);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Exact (case-sensitive) matches in `targets`, in reading order: title
+    /// first, then each tab.
+    fn replace_matches(&self, targets: &[usize]) -> Vec<FindHit> {
+        let find = &self.catalog.replace_find;
+        let mut hits = vec![];
+        if find.is_empty() {
+            return hits;
+        }
+        for &i in targets {
+            let n = &self.data.notes[i];
+            for _ in n.title.match_indices(find.as_str()) {
+                hits.push((i, None));
+            }
+            for (tab, body) in std::iter::once((0, n.body.as_str())).chain(
+                n.document
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(tab, t)| (tab, t.body.as_str())),
+            ) {
+                for range in exact_ranges(body, find) {
+                    hits.push((i, Some((tab, range))));
+                }
+            }
+        }
+        hits
+    }
+    fn replace_count(&self, targets: &[usize]) -> usize {
+        self.replace_matches(targets).len()
+    }
+    /// Select the next match: its memo in the list and the text in the preview.
+    fn replace_find_next(&mut self, targets: &[usize]) {
+        let hits = self.replace_matches(targets);
+        if hits.is_empty() {
+            self.catalog.replace_message = "찾는 내용이 없습니다".into();
+            self.catalog.replace_cursor = None;
+            return;
+        }
+        let at = self
+            .catalog
+            .replace_cursor
+            .map_or(0, |c| (c + 1) % hits.len());
+        self.catalog.replace_cursor = Some(at);
+        let (id, location) = hits[at].clone();
+        self.catalog.results_open = false;
+        self.catalog.selected = Some(id);
+        self.catalog.selected_many = BTreeSet::from([id]);
+        self.catalog.find_selection = location.map(|(tab, range)| (id, tab, range));
+        self.catalog.replace_message = format!(
+            "{} / {} · {}",
+            at + 1,
+            hits.len(),
+            if self.data.notes[id].title.is_empty() {
+                "제목 없음"
+            } else {
+                &self.data.notes[id].title
+            }
+        );
+    }
+    /// Replace the current match, then move on to the next one.
+    fn replace_current(&mut self, targets: &[usize]) {
+        let hits = self.replace_matches(targets);
+        let Some(at) = self.catalog.replace_cursor.filter(|&c| c < hits.len()) else {
+            self.replace_find_next(targets);
+            return;
+        };
+        let (i, location) = hits[at].clone();
+        let find = self.catalog.replace_find.clone();
+        let with = self.catalog.replace_with.clone();
+        let n = &mut self.data.notes[i];
+        match location {
+            None => n.title = n.title.replacen(&find, &with, 1),
+            Some((tab, range)) => {
+                if let Some(first) = n.document.tabs.first_mut() {
+                    sync_tab_body(first, &n.body);
+                }
+                if let Some(t) = n.document.tabs.get_mut(tab) {
+                    replace_tab_range(t, range, &find, &with);
+                }
+                if let Some(first) = n.document.tabs.first() {
+                    n.body = first.body.clone();
+                }
+            }
+        }
+        // The replaced text is no longer a match: the next one now sits at
+        // the same index.
+        self.catalog.replace_cursor = at.checked_sub(1);
+        if self.replace_matches(targets).is_empty() {
+            self.catalog.replace_cursor = None;
+            self.catalog.replace_message = "모두 바꿨습니다".into();
+        } else {
+            if at == 0 {
+                self.catalog.replace_cursor = None;
+            }
+            self.replace_find_next(targets);
+        }
+    }
+    /// Gather one result per memo and show them in the preview pane.
+    fn replace_find_all(&mut self, targets: &[usize]) {
+        let find = self.catalog.replace_find.clone();
+        let mut results = vec![];
+        for &i in targets {
+            let n = &self.data.notes[i];
+            let count = n.title.matches(find.as_str()).count()
+                + std::iter::once(n.body.as_str())
+                    .chain(n.document.tabs.iter().skip(1).map(|t| t.body.as_str()))
+                    .map(|b| b.matches(find.as_str()).count())
+                    .sum::<usize>();
+            if count == 0 {
+                continue;
+            }
+            let title_hit = n.title.find(find.as_str()).map(|b| b..b + find.len());
+            let line = std::iter::once(n.body.as_str())
+                .chain(n.document.tabs.iter().skip(1).map(|t| t.body.as_str()))
+                .flat_map(|b| b.lines())
+                .find(|l| l.contains(find.as_str()))
+                .map(|l| crate::composer::strip_pictures(l).trim().to_string());
+            let (line, line_hit) = match line {
+                Some(l) => {
+                    let hit = l.find(find.as_str()).map(|b| b..b + find.len());
+                    (l, hit)
+                }
+                None => ("제목에서 찾았습니다".into(), None),
+            };
+            results.push(FindResult {
+                note: i,
+                title_hit,
+                line,
+                line_hit,
+                count,
+            });
+        }
+        self.catalog
+            .results_selected
+            .retain(|n| results.iter().any(|r| r.note == *n));
+        self.catalog.replace_message = format!("{}개 메모에서 찾았습니다", results.len());
+        self.catalog.results = results;
+        self.catalog.results_open = true;
+    }
+    /// The "모두 찾기" results in the preview pane, with the actions on top
+    /// so they stay reachable when the dialog falls behind the main window.
+    fn catalog_results(&mut self, ui: &mut egui::Ui, height: f32) {
+        let tone = ui::t(ui);
+        let mut action = None;
+        ui.set_height(height);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("찾기 결과").strong().size(14.));
+            ui.label(
+                RichText::new(format!(
+                    "{}개 · {}개 선택",
+                    self.catalog.results.len(),
+                    self.catalog.results_selected.len()
+                ))
+                .size(12.)
+                .color(tone.faint),
+            );
+        });
+        ui.add_space(4.);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !self.catalog.results_selected.is_empty(),
+                    egui::Button::new("바꾸기"),
+                )
+                .on_hover_text("선택한 결과의 메모에서 바꿉니다")
+                .clicked()
+            {
+                action = Some(0);
+            }
+            if ui.button("모두 바꾸기").clicked() {
+                action = Some(1);
+            }
+            if ui.button("다른 찾기").clicked() {
+                action = Some(2);
+            }
+            if ui.button("찾아 바꾸기 마침").clicked() {
+                action = Some(3);
+            }
+        });
+        ui.add_space(6.);
+        let find = self.catalog.replace_find.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("find_results")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if self.catalog.results.is_empty() {
+                    ui::empty_state(
+                        ui,
+                        crate::icons::Icon::Search,
+                        "찾은 내용이 없습니다",
+                        "‘다른 찾기’로 검색어를 바꿔 보세요",
+                    );
+                }
+                for k in 0..self.catalog.results.len() {
+                    let r = self.catalog.results[k].clone();
+                    let selected = self.catalog.results_selected.contains(&r.note);
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 52.), Sense::click());
+                    let color = self.data.notes[r.note].color;
+                    ui.painter().rect(
+                        rect,
+                        8.,
+                        if selected {
+                            tone.accent_soft
+                        } else if resp.hovered() {
+                            tone.hover
+                        } else {
+                            tone.bg
+                        },
+                        Stroke::new(1.0_f32, if selected { ACCENT } else { tone.line }),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().circle_filled(
+                        egui::pos2(rect.left() + 14., rect.top() + 17.),
+                        4.5,
+                        color,
+                    );
+                    let x = rect.left() + 26.;
+                    let width = rect.right() - x - 10.;
+                    let title = &self.data.notes[r.note].title;
+                    let title = if title.is_empty() {
+                        "제목 없음"
+                    } else {
+                        title
+                    };
+                    let job = highlight_job(
+                        title,
+                        r.title_hit.clone(),
+                        egui::FontId::proportional(13.5),
+                        tone.ink,
+                        width,
+                    );
+                    let galley = ui.fonts(|f| f.layout_job(job));
+                    ui.painter()
+                        .galley(egui::pos2(x, rect.top() + 8.), galley, tone.ink);
+                    let job = highlight_job(
+                        &r.line,
+                        r.line_hit.clone(),
+                        egui::FontId::proportional(12.),
+                        tone.muted,
+                        width,
+                    );
+                    let galley = ui.fonts(|f| f.layout_job(job));
+                    ui.painter()
+                        .galley(egui::pos2(x, rect.top() + 29.), galley, tone.muted);
+                    if r.count > 1 {
+                        ui.painter().text(
+                            egui::pos2(rect.right() - 10., rect.top() + 16.),
+                            egui::Align2::RIGHT_CENTER,
+                            format!("{}곳", r.count),
+                            egui::FontId::proportional(11.),
+                            tone.faint,
+                        );
+                    }
+                    let resp = resp
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(format!("‘{find}’ · 클릭해서 선택 / 해제"));
+                    if resp.clicked() {
+                        if !self.catalog.results_selected.remove(&r.note) {
+                            self.catalog.results_selected.insert(r.note);
+                        }
+                        self.catalog.selected = Some(r.note);
+                    }
+                    ui.add_space(4.);
+                }
+            });
+        match action {
+            Some(0) => {
+                let target: Vec<_> = self.catalog.results_selected.iter().copied().collect();
+                self.catalog_apply_replacement(&target);
+                self.catalog.results_selected.clear();
+                let target = self.catalog_replace_targets();
+                self.replace_find_all(&target);
+            }
+            Some(1) => {
+                let target: Vec<_> = self.catalog.results.iter().map(|r| r.note).collect();
+                self.catalog_apply_replacement(&target);
+                let target = self.catalog_replace_targets();
+                self.replace_find_all(&target);
+            }
+            Some(2) => {
+                self.catalog.replace_open = true;
+                ui::raise(ui.ctx(), "catalog_replace");
+            }
+            Some(3) => {
+                self.catalog.results_open = false;
+                self.catalog.replace_open = false;
+                self.catalog.results.clear();
+                self.catalog.results_selected.clear();
+            }
+            _ => {}
         }
     }
 
@@ -1744,6 +2074,10 @@ impl App {
                     && !self.catalog.replace_find.is_empty()
                     && match self.catalog.replace_scope {
                         0 => selected == Some(*i),
+                        1 if !self.catalog.replace_projects.is_empty() => self
+                            .catalog
+                            .replace_projects
+                            .contains(&n.project.unwrap_or(NO_PROJECT)),
                         1 => crate::refinements::project_match(
                             Some(project.unwrap_or(NO_PROJECT)),
                             n.project,
@@ -1850,6 +2184,100 @@ fn replace_tab_text(tab: &mut crate::composer::Tab, find: &str, replacement: &st
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReplaceCommand {
+    FindNext,
+    Replace,
+    FindAll,
+    ReplaceAll,
+}
+
+/// Character ranges of exact (case-sensitive) occurrences of `find`.
+fn exact_ranges(text: &str, find: &str) -> Vec<Range<usize>> {
+    if find.is_empty() {
+        return vec![];
+    }
+    let width = find.chars().count();
+    text.match_indices(find)
+        .map(|(byte, _)| {
+            let start = text[..byte].chars().count();
+            start..start + width
+        })
+        .collect()
+}
+
+/// Replace the occurrence of `find` at character range `range`, if it is
+/// still there, keeping formatting spans anchored.
+fn replace_tab_range(
+    tab: &mut crate::composer::Tab,
+    range: Range<usize>,
+    find: &str,
+    replacement: &str,
+) -> bool {
+    let Some((start, _)) = tab.body.char_indices().nth(range.start) else {
+        return false;
+    };
+    if !tab.body[start..].starts_with(find) {
+        return false;
+    }
+    tab.body
+        .replace_range(start..start + find.len(), replacement);
+    remap_spans(
+        &mut tab.spans,
+        range.start,
+        range.end,
+        replacement.chars().count(),
+    );
+    true
+}
+
+/// One line of text truncated to `width`, with `hit` (a byte range)
+/// highlighted.
+fn highlight_job(
+    text: &str,
+    hit: Option<Range<usize>>,
+    font: egui::FontId,
+    color: Color32,
+    width: f32,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let plain = egui::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    match hit.filter(|h| {
+        h.end <= text.len() && text.is_char_boundary(h.start) && text.is_char_boundary(h.end)
+    }) {
+        Some(h) => {
+            // Keep the hit visible on long lines: start a little before it.
+            let lead = text[..h.start]
+                .char_indices()
+                .rev()
+                .nth(16)
+                .map_or(0, |(b, _)| b);
+            if lead > 0 {
+                job.append("…", 0., plain.clone());
+            }
+            job.append(&text[lead..h.start], 0., plain.clone());
+            job.append(
+                &text[h.clone()],
+                0.,
+                egui::TextFormat {
+                    font_id: font,
+                    color: INK,
+                    background: Color32::from_rgb(255, 222, 120),
+                    ..Default::default()
+                },
+            );
+            job.append(&text[h.end..], 0., plain);
+        }
+        None => job.append(text, 0., plain),
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(40.));
+    job
+}
+
 /// Character ranges, rather than byte offsets, match TextEdit's cursor contract.
 fn panel_height(ui: &egui::Ui) -> f32 {
     // This view can live inside an outer ScrollArea and a horizontal row. Its
@@ -1925,6 +2353,45 @@ mod tests {
             .unwrap_or_else(|| panic!("visible table text missing: {text}"))
     }
 
+    #[test]
+    fn find_next_and_replace_walk_matches_across_projects() {
+        let mut a = App::sample(Local::now().date_naive());
+        a.data.notes[0].body = "사과 하나, 사과 둘".into();
+        a.data.notes[0].project = Some(0);
+        a.data.notes[1].body = "사과 셋".into();
+        a.data.notes[1].project = Some(1);
+        a.data.notes[2].body = "사과 넷".into();
+        a.data.notes[2].project = None;
+        a.catalog.replace_find = "사과".into();
+        a.catalog.replace_with = "배".into();
+        a.catalog.replace_scope = 1;
+        a.catalog.replace_projects = BTreeSet::from([0, 1]);
+        let targets = a.catalog_replace_targets();
+        assert!(targets.contains(&0) && targets.contains(&1) && !targets.contains(&2));
+        let total = a.replace_count(&targets);
+        a.replace_find_next(&targets);
+        assert_eq!(
+            a.catalog.find_selection.as_ref().map(|s| s.2.clone()),
+            Some(0..2)
+        );
+        // Replace the first, then the cursor stays on the next match.
+        a.replace_current(&targets);
+        assert_eq!(a.data.notes[0].body, "배 하나, 사과 둘");
+        assert_eq!(a.replace_count(&targets), total - 1);
+        assert_eq!(
+            a.catalog.find_selection.as_ref().map(|s| s.2.clone()),
+            Some(6..8)
+        );
+        // "모두 찾기" lists one result per memo with the hit highlighted.
+        a.replace_find_all(&targets);
+        assert!(a.catalog.results_open);
+        let r = a.catalog.results.iter().find(|r| r.note == 1).unwrap();
+        assert_eq!(&r.line[r.line_hit.clone().unwrap()], "사과");
+        assert!(
+            a.data.notes[2].body.contains("사과"),
+            "other projects are untouched"
+        );
+    }
     fn representative_table_app() -> App {
         let mut a = App::sample(Local::now().date_naive());
         let n = &mut a.data.notes[0];

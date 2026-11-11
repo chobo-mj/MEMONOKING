@@ -106,17 +106,7 @@ fn date_time_row(
         .on_hover_text("달력에서 날짜 선택")
         .clicked();
         ui.add_space(6.);
-        ui.add(
-            egui::DragValue::new(&mut hm.0)
-                .range(0..=23)
-                .custom_formatter(|v, _| format!("{:02}", v as u32)),
-        );
-        ui.label(":");
-        ui.add(
-            egui::DragValue::new(&mut hm.1)
-                .range(0..=59)
-                .custom_formatter(|v, _| format!("{:02}", v as u32)),
-        );
+        crate::ui::time_input(ui, label, &mut hm.0, &mut hm.1);
     });
     picked
 }

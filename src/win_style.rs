@@ -63,11 +63,21 @@ mod imp {
             let h = s.hwnd as HWND;
             let alpha = (opacity.clamp(0., 1.) * 255.).round() as u8;
             if s.alpha != Some(alpha) {
+                // An opaque window is left unlayered: a layered OpenGL window
+                // stopped presenting new frames after it was resized from a
+                // title strip or color box back to a full sticker.
                 let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-                if ex & WS_EX_LAYERED as isize == 0 {
-                    SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+                let layered = ex & WS_EX_LAYERED as isize != 0;
+                if alpha == u8::MAX {
+                    if layered {
+                        SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !(WS_EX_LAYERED as isize));
+                    }
+                } else {
+                    if !layered {
+                        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+                    }
+                    SetLayeredWindowAttributes(h, 0, alpha, LWA_ALPHA);
                 }
-                SetLayeredWindowAttributes(h, 0, alpha, LWA_ALPHA);
                 s.alpha = Some(alpha);
             }
             if s.native_round.is_none() {

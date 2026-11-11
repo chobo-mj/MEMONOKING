@@ -43,6 +43,8 @@ pub struct Extra {
     pub board_tab: usize,
     pub utilities_tab: usize,
     pub created_basis: bool,
+    /// Show completed memos in the memo lists.
+    pub show_done: bool,
     pub hidden_projects: HashSet<usize>,
     pub deleted_projects: HashSet<usize>,
     pub project_manager: bool,
@@ -97,6 +99,7 @@ impl Default for Extra {
             board_tab: 0,
             utilities_tab: 0,
             created_basis: false,
+            show_done: false,
             hidden_projects: HashSet::new(),
             deleted_projects: HashSet::new(),
             project_manager: false,
@@ -260,7 +263,6 @@ impl App {
         self.render_note_windows(ctx);
     }
     pub fn date_controls(&mut self, ui: &mut egui::Ui, i: usize) {
-        let today = Local::now().date_naive();
         let start = self.data.notes[i].date;
         let time = self.data.notes[i].time;
         let end = start.map(|d| d + Duration::days(self.data.notes[i].duration.max(1) as i64 - 1));
@@ -274,50 +276,35 @@ impl App {
             let label = start
                 .map(|d| format!("{} {}", d.format("%m.%d"), time.format("%H:%M")))
                 .unwrap_or_else(|| "일정 시작".into());
-            if crate::icons::text_button(
-                ui,
-                crate::icons::Icon::Calendar,
-                &label,
-                "일정 시작 날짜와 시간",
-            )
-            .clicked()
-            {
-                let mut p = Picker::new(0, start.unwrap_or(today), time);
-                p.owner = ui.ctx().viewport_id();
-                p.bound_note = Some((i, self.extra.edit_occurrence));
-                self.extra.picker = Some(p);
-            }
+            // Both ends open the same schedule popup the sticker uses.
+            let mut schedule =
+                crate::icons::text_button(ui, crate::icons::Icon::Calendar, &label, "일정 설정")
+                    .clicked();
             ui.label(RichText::new("→").color(crate::ui::t(ui).faint));
             let label = end
                 .map(|d| format!("{} {}", d.format("%m.%d"), end_time.format("%H:%M")))
                 .unwrap_or_else(|| "일정 완료".into());
-            if crate::icons::text_button(
-                ui,
-                crate::icons::Icon::Calendar,
-                &label,
-                "일정 종료 날짜와 시간",
-            )
-            .clicked()
-            {
-                let mut p = Picker::new(9, end.unwrap_or(today), end_time);
-                p.owner = ui.ctx().viewport_id();
-                p.bound_note = Some((i, self.extra.edit_occurrence));
-                self.extra.picker = Some(p);
-            }
+            schedule |=
+                crate::icons::text_button(ui, crate::icons::Icon::Calendar, &label, "일정 설정")
+                    .clicked();
             ui.add_space(4.);
             let n = &mut self.data.notes[i];
-            if crate::ui::pill(ui, n.recurring, "정기 일정")
-                .on_hover_text("정기 일정 표시 · 반복 엔진은 후속 연결")
-                .clicked()
-            {
-                n.recurring = !n.recurring;
-            }
+            let repeat = match (n.date, n.repeat.is_none()) {
+                (Some(d), false) => n.repeat.describe(d),
+                _ => "정기 일정".into(),
+            };
+            schedule |= crate::ui::pill(ui, n.recurring || !n.repeat.is_none(), &repeat)
+                .on_hover_text("반복 일정 설정")
+                .clicked();
             if crate::ui::pill(ui, n.wiki, "위키").clicked() {
                 n.wiki = !n.wiki;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 crate::ui::hint(ui, &created);
             });
+            if schedule {
+                self.open_schedule(i);
+            }
         });
         ui.add_space(4.);
         ui.horizontal(|ui| {

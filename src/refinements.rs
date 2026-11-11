@@ -147,6 +147,13 @@ impl App {
                 .unwrap_or_default();
         }
     }
+    /// Open memo `i` in the memo editor window rather than as a sticker.
+    pub fn open_editor_on(&mut self, i: usize, d: Option<NaiveDate>) {
+        self.open_note_on(i, d);
+        if let Some(w) = self.studio.windows.get_mut(&i) {
+            w.edit();
+        }
+    }
     pub fn drag_source_on(
         &mut self,
         ui: &egui::Ui,
