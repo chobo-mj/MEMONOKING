@@ -441,7 +441,7 @@ impl App {
     }
     pub fn calendar(&mut self, ui: &mut egui::Ui) {
         let today = Local::now().date_naive();
-        let tone = ui::t(ui);
+        let (tone, sun, sat, today_mark) = self.calendar_tone(ui);
         ui.horizontal(|ui| {
             ui.set_min_height(32.);
             ui.label(
@@ -482,8 +482,8 @@ impl App {
                 label,
                 egui::FontId::proportional(12.),
                 match i {
-                    0 => ACCENT,
-                    6 => ui::BLUE,
+                    0 => sun,
+                    6 => sat,
                     _ => tone.faint,
                 },
             );
@@ -494,6 +494,9 @@ impl App {
         let height = if width < 580. { 104. } else { 122. };
         let (all, _) =
             ui.allocate_exact_size(Vec2::new(width, rows as f32 * height), Sense::hover());
+        if let Some(theme) = self.cal.active() {
+            ui.painter().rect_filled(all, 8., theme.card);
+        }
         ui.painter().rect_stroke(
             all,
             8.,
@@ -561,15 +564,15 @@ impl App {
                 (1, 1) | (3, 1) | (5, 5) | (6, 6) | (8, 15) | (10, 3) | (10, 9) | (12, 25)
             );
             let datecolor = if holiday || weekday == 0 {
-                ACCENT
+                sun
             } else if weekday == 6 {
-                ui::BLUE
+                sat
             } else {
                 tone.ink
             };
             let number = rect.min + Vec2::new(17., 18.);
             if day == today {
-                ui.painter().circle_filled(number, 11., ACCENT);
+                ui.painter().circle_filled(number, 11., today_mark);
             }
             ui.painter().text(
                 number,
@@ -594,105 +597,8 @@ impl App {
                     }
                 });
             }
-            let mut ids: Vec<_> = self
-                .data
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| self.visible(*i) && self.calendar_matches(n, day))
-                .map(|(i, _)| i)
-                .collect();
-            ids.sort_by_key(|&i| self.data.notes[i].time);
-            let count = ids.len();
-            let capacity = (((height - 36.) / 22.).floor() as usize).max(1);
-            let shown = if count > capacity {
-                capacity - 1
-            } else {
-                count
-            };
-            for (row, i) in ids.into_iter().take(shown).enumerate() {
-                let pill = Rect::from_min_size(
-                    rect.min + Vec2::new(5., 33. + row as f32 * 22.),
-                    Vec2::new(col - 10., 20.),
-                );
-                let n = &self.data.notes[i];
-                let done = n.done_on(Some(day));
-                let base = n.color;
-                let fill = if self.dark {
-                    Color32::from_rgb(52, 50, 46)
-                } else {
-                    base
-                };
-                let response = ui
-                    .interact(
-                        pill,
-                        ui.id().with(("pill", i, day)),
-                        Sense::click_and_drag(),
-                    )
-                    .on_hover_text(&n.title)
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                ui.painter().rect_filled(
-                    pill,
-                    4.,
-                    if response.hovered() {
-                        ui::lerp_color(fill, Color32::BLACK, 0.06)
-                    } else {
-                        fill
-                    },
-                );
-                let label = if n.title.trim().is_empty() {
-                    "제목 없음".to_owned()
-                } else {
-                    n.title.clone()
-                };
-                let mut job = egui::text::LayoutJob::single_section(
-                    label,
-                    egui::TextFormat {
-                        font_id: egui::FontId::proportional(11.5),
-                        color: if done {
-                            tone.faint
-                        } else if self.dark {
-                            tone.ink
-                        } else {
-                            INK
-                        },
-                        strikethrough: if done {
-                            Stroke::new(1.0_f32, tone.faint)
-                        } else {
-                            Stroke::NONE
-                        },
-                        ..Default::default()
-                    },
-                );
-                job.wrap = egui::text::TextWrapping::truncate_at_width(pill.width() - 12.);
-                let galley = ui.fonts(|f| f.layout_job(job));
-                ui.painter().galley(
-                    egui::pos2(pill.left() + 6., pill.center().y - galley.size().y / 2.),
-                    galley,
-                    INK,
-                );
-                response.dnd_set_drag_payload(NoteDrag);
-                let occurrence = if self.desktop.calendar_basis == 1 {
-                    Some(day)
-                } else {
-                    None
-                };
-                self.drag_source_on(ui, &response, i, occurrence);
-                if response.clicked() {
-                    self.open_sticker(i, occurrence);
-                }
-            }
-            if count > shown {
-                ui.painter().text(
-                    rect.min + Vec2::new(9., 33. + shown as f32 * 22. + 10.),
-                    egui::Align2::LEFT_CENTER,
-                    format!("+{}개 더보기", count - shown),
-                    egui::FontId::proportional(11.),
-                    tone.muted,
-                );
-            }
         }
-        ui.add_space(18.);
+        self.calendar_bands(ui, all, rows, offset, col, height);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
@@ -726,6 +632,212 @@ impl App {
         }
         for i in ids {
             self.task_row_on(ui, i, Some(self.day));
+        }
+    }
+    /// Memo bands of the month grid. A memo shown on several days in a row
+    /// is one band across those days (split only at week rows), placed in
+    /// lanes so bands never overlap.
+    fn calendar_bands(
+        &mut self,
+        ui: &mut egui::Ui,
+        all: Rect,
+        rows: usize,
+        offset: usize,
+        col: f32,
+        height: f32,
+    ) {
+        let (tone, ..) = self.calendar_tone(ui);
+        let month = self.month.month();
+        let capacity = (((height - 36.) / 22.).floor() as usize).max(1);
+        for row in 0..rows {
+            let start = self.month + Duration::days((row * 7) as i64 - offset as i64);
+            let days: Vec<NaiveDate> = (0..7).map(|c| start + Duration::days(c)).collect();
+            let shown_day = |c: usize| days[c].month() == month;
+            let mut segments = band_segments(
+                &self.data.notes,
+                |i| self.visible(i),
+                |n, d| self.calendar_matches(n, d),
+                &days,
+                shown_day,
+            );
+            segments.sort_by_key(|s| {
+                (
+                    s.first,
+                    std::cmp::Reverse(s.last - s.first),
+                    self.data.notes[s.note].time,
+                )
+            });
+            let lanes = assign_lanes(&segments);
+            let mut covering = [0usize; 7];
+            for s in &segments {
+                for c in &mut covering[s.first..=s.last] {
+                    *c += 1;
+                }
+            }
+            let visible_lanes: Vec<usize> = covering
+                .iter()
+                .map(|&n| if n > capacity { capacity - 1 } else { capacity })
+                .collect();
+            let row_top = all.top() + row as f32 * height;
+            for (s, &lane) in segments.iter().zip(&lanes) {
+                // Draw the parts of the band whose days have room for its lane.
+                let mut c = s.first;
+                while c <= s.last {
+                    if lane >= visible_lanes[c] {
+                        c += 1;
+                        continue;
+                    }
+                    let from = c;
+                    while c < s.last && lane < visible_lanes[c + 1] {
+                        c += 1;
+                    }
+                    let open_left = from == s.first && s.starts_here;
+                    let open_right = c == s.last && s.ends_here;
+                    let rect = Rect::from_min_max(
+                        egui::pos2(
+                            all.left() + from as f32 * col + if open_left { 5. } else { 0. },
+                            row_top + 33. + lane as f32 * 22.,
+                        ),
+                        egui::pos2(
+                            all.left() + (c + 1) as f32 * col - if open_right { 5. } else { 0. },
+                            row_top + 33. + lane as f32 * 22. + 20.,
+                        ),
+                    );
+                    self.calendar_band(
+                        ui,
+                        &tone,
+                        s.note,
+                        rect,
+                        &days[from..=c],
+                        open_left,
+                        open_right,
+                    );
+                    c += 1;
+                }
+            }
+            for (c, &n) in covering.iter().enumerate() {
+                if n > capacity && shown_day(c) {
+                    let shown = capacity - 1;
+                    ui.painter().text(
+                        egui::pos2(
+                            all.left() + c as f32 * col + 9.,
+                            row_top + 33. + shown as f32 * 22. + 10.,
+                        ),
+                        egui::Align2::LEFT_CENTER,
+                        format!("+{}개 더보기", n - shown),
+                        egui::FontId::proportional(11.),
+                        tone.muted,
+                    );
+                }
+            }
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn calendar_band(
+        &mut self,
+        ui: &mut egui::Ui,
+        tone: &ui::Tone,
+        i: usize,
+        rect: Rect,
+        days: &[NaiveDate],
+        open_left: bool,
+        open_right: bool,
+    ) {
+        let n = &self.data.notes[i];
+        let done = days.iter().all(|&d| n.done_on(Some(d)));
+        let fill = if self.dark {
+            Color32::from_rgb(52, 50, 46)
+        } else {
+            n.color
+        };
+        let response = ui
+            .interact(
+                rect,
+                ui.id().with(("band", i, days[0])),
+                Sense::click_and_drag(),
+            )
+            .on_hover_text(&n.title)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let r = |open: bool| if open { 4 } else { 0 };
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius {
+                nw: r(open_left),
+                sw: r(open_left),
+                ne: r(open_right),
+                se: r(open_right),
+            },
+            if response.hovered() {
+                ui::lerp_color(fill, Color32::BLACK, 0.06)
+            } else {
+                fill
+            },
+        );
+        let label = if n.title.trim().is_empty() {
+            "제목 없음".to_owned()
+        } else {
+            n.title.clone()
+        };
+        let mut job = egui::text::LayoutJob::single_section(
+            label,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(11.5),
+                color: if done {
+                    tone.faint
+                } else if self.dark {
+                    tone.ink
+                } else {
+                    INK
+                },
+                strikethrough: if done {
+                    Stroke::new(1.0_f32, tone.faint)
+                } else {
+                    Stroke::NONE
+                },
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 12.);
+        let galley = ui.fonts(|f| f.layout_job(job));
+        ui.painter().galley(
+            egui::pos2(rect.left() + 6., rect.center().y - galley.size().y / 2.),
+            galley,
+            INK,
+        );
+        // The day under the pointer is the occurrence a click or drag uses.
+        let day = response
+            .interact_pointer_pos()
+            .or(response.hover_pos())
+            .map(|p| {
+                let k = ((p.x - rect.left()) / (rect.width() / days.len() as f32)).floor();
+                days[(k.max(0.) as usize).min(days.len() - 1)]
+            })
+            .unwrap_or(days[0]);
+        response.dnd_set_drag_payload(NoteDrag);
+        let occurrence = if self.desktop.calendar_basis == 1 {
+            Some(day)
+        } else {
+            None
+        };
+        self.drag_source_on(ui, &response, i, occurrence);
+        if response.clicked() {
+            self.open_sticker(i, occurrence);
+        }
+    }
+    /// Colors of the month grid: the app's own, or the calendar window's
+    /// theme. Returns the tone and the Sunday, Saturday and today marks.
+    fn calendar_tone(&self, ui: &egui::Ui) -> (ui::Tone, Color32, Color32, Color32) {
+        let mut tone = ui::t(ui);
+        match self.cal.active() {
+            Some(t) => {
+                tone.ink = t.ink;
+                tone.muted = t.muted;
+                tone.faint = t.faint;
+                tone.line = t.line;
+                tone.accent_soft = t.select;
+                (tone, t.sun, t.sat, t.today)
+            }
+            None => (tone, ACCENT, ui::BLUE, ACCENT),
         }
     }
     fn calendar_matches(&self, n: &Note, day: NaiveDate) -> bool {
@@ -1243,5 +1355,117 @@ fn edge(p: &egui::Painter, a: Rect, b: Rect, color: Color32, both: bool) {
     head(y, x);
     if both {
         head(x, y);
+    }
+}
+/// A run of consecutive days of one week row on which memo `note` shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandSegment {
+    pub note: usize,
+    pub first: usize,
+    pub last: usize,
+    /// The memo does not show the day before `first` (round the left end).
+    pub starts_here: bool,
+    /// The memo does not show the day after `last` (round the right end).
+    pub ends_here: bool,
+}
+/// Runs of consecutive `days` (one week row) on which each memo shows.
+pub fn band_segments(
+    notes: &[Note],
+    visible: impl Fn(usize) -> bool,
+    matches: impl Fn(&Note, NaiveDate) -> bool,
+    days: &[NaiveDate],
+    shown_day: impl Fn(usize) -> bool,
+) -> Vec<BandSegment> {
+    let mut out = vec![];
+    for (i, n) in notes.iter().enumerate() {
+        if !visible(i) {
+            continue;
+        }
+        let on: Vec<bool> = days
+            .iter()
+            .enumerate()
+            .map(|(c, &d)| shown_day(c) && matches(n, d))
+            .collect();
+        let mut c = 0;
+        while c < on.len() {
+            if !on[c] {
+                c += 1;
+                continue;
+            }
+            let first = c;
+            while c + 1 < on.len() && on[c + 1] {
+                c += 1;
+            }
+            out.push(BandSegment {
+                note: i,
+                first,
+                last: c,
+                starts_here: !(first == 0 && matches(n, days[0] - Duration::days(1))),
+                ends_here: !(c == on.len() - 1 && matches(n, days[c] + Duration::days(1))),
+            });
+            c += 1;
+        }
+    }
+    out
+}
+/// The lowest free lane for each segment, in order.
+pub fn assign_lanes(segments: &[BandSegment]) -> Vec<usize> {
+    let mut used: Vec<[bool; 7]> = vec![];
+    segments
+        .iter()
+        .map(|s| {
+            let lane = (0..)
+                .find(|&l| {
+                    used.get(l)
+                        .is_none_or(|u| u[s.first..=s.last].iter().all(|x| !x))
+                })
+                .unwrap();
+            if used.len() <= lane {
+                used.resize(lane + 1, [false; 7]);
+            }
+            for x in &mut used[lane][s.first..=s.last] {
+                *x = true;
+            }
+            lane
+        })
+        .collect()
+}
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+    #[test]
+    fn a_multi_day_memo_is_one_band_split_only_by_week_rows() {
+        let d = |day: u32| NaiveDate::from_ymd_opt(2026, 11, day).unwrap();
+        let mut long = Note::new("화면 흐름 검토", Some(d(17)), 0);
+        long.duration = 4;
+        let mut wrap = Note::new("주말 걸침", Some(d(20)), 1);
+        wrap.duration = 3;
+        let one = Note::new("하루", Some(d(18)), 2);
+        let notes = vec![long, wrap, one];
+        // Week row Sun 15 .. Sat 21.
+        let days: Vec<_> = (15..=21).map(d).collect();
+        let segs = band_segments(&notes, |_| true, |n, day| n.occurs(day), &days, |_| true);
+        assert_eq!(
+            segs[0],
+            BandSegment {
+                note: 0,
+                first: 2,
+                last: 5,
+                starts_here: true,
+                ends_here: true
+            }
+        );
+        // Runs on into the next week: the right end stays open.
+        assert_eq!(
+            segs[1],
+            BandSegment {
+                note: 1,
+                first: 5,
+                last: 6,
+                starts_here: true,
+                ends_here: false
+            }
+        );
+        assert_eq!(assign_lanes(&segs), vec![0, 1, 1]);
     }
 }

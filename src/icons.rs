@@ -50,6 +50,7 @@ pub enum Icon {
     Eye,
     Bell,
     Restore2,
+    Stand,
 }
 
 /// An icon-only control with a consistent hit area, keyboard focus and a spoken label.
@@ -339,6 +340,13 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
                     (12. + 8.9 * a.cos(), 12. + 8.9 * a.sin()),
                 );
             }
+        }
+        Icon::Stand => {
+            rounded((4.5, 3.5), (19.5, 15.), 2.);
+            line((4.5, 7.), (19.5, 7.));
+            line((9., 15.), (6.5, 20.5));
+            line((15., 15.), (17.5, 20.5));
+            line((12., 15.), (12., 20.5));
         }
         Icon::Pin => {
             closed(&[

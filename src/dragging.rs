@@ -14,7 +14,10 @@ pub struct Source {
 pub enum Destination {
     Date(NaiveDate),
     Parent(usize),
+    /// A wiki folder, or `None` for the unfiled wiki memos.
     WikiFolder(Option<usize>),
+    /// The root of a wiki tab's tree.
+    WikiTab(usize),
 }
 #[derive(Clone)]
 pub struct Target {
@@ -151,7 +154,20 @@ impl App {
                                                 self.toast="폴더의 자기 자신/하위 폴더 안으로는 이동할 수 없습니다".into();
                                             }
                                         } else if self.data.notes[d.source.note].wiki {
-                                            self.data.notes[d.source.note].folder = folder;
+                                            let tab = folder.map(|f| self.extra.folders[f].tab);
+                                            let n = &mut self.data.notes[d.source.note];
+                                            n.folder = folder;
+                                            n.wiki_tab = tab;
+                                            self.toast = "위키 메모를 분류했습니다".into();
+                                        }
+                                    }
+                                    Destination::WikiTab(tab) => {
+                                        if d.source.folder {
+                                            self.move_folder_to_tab(d.source.note, tab);
+                                        } else if self.data.notes[d.source.note].wiki {
+                                            let n = &mut self.data.notes[d.source.note];
+                                            n.folder = None;
+                                            n.wiki_tab = Some(tab);
                                             self.toast = "위키 메모를 분류했습니다".into();
                                         }
                                     }
@@ -348,6 +364,7 @@ mod wiki_period_tests {
             title: "두번째".into(),
             description: String::new(),
             parent: None,
+            tab: 0,
         });
         let mut source = super::tests::source();
         source.folder = true;

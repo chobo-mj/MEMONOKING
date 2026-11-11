@@ -19,6 +19,65 @@ pub fn project_label(filter: Option<usize>, names: &[String]) -> &str {
         Some(p) => names.get(p).map(String::as_str).unwrap_or("프로젝트 없음"),
     }
 }
+/// A large, clickable choice row: icon badge, title and one line of detail.
+fn scope_card(
+    ui: &mut egui::Ui,
+    icon: crate::icons::Icon,
+    title: &str,
+    detail: &str,
+    primary: bool,
+) -> egui::Response {
+    let tone = crate::ui::t(ui);
+    let (rect, r) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 62.), egui::Sense::click());
+    let fill = match (primary, r.hovered()) {
+        (true, true) => crate::ui::lerp_color(ACCENT, Color32::BLACK, 0.08),
+        (true, false) => ACCENT,
+        (false, true) => tone.hover,
+        (false, false) => tone.sidebar,
+    };
+    ui.painter().rect_filled(rect, 12., fill);
+    if !primary {
+        ui.painter().rect_stroke(
+            rect,
+            12.,
+            egui::Stroke::new(1.0_f32, tone.line),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let (ink, sub, badge_fill, mark) = if primary {
+        (
+            Color32::WHITE,
+            Color32::from_white_alpha(215),
+            Color32::from_white_alpha(40),
+            Color32::WHITE,
+        )
+    } else {
+        (tone.ink, tone.muted, tone.accent_soft, ACCENT)
+    };
+    let badge = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 32., rect.center().y),
+        egui::vec2(34., 34.),
+    );
+    ui.painter().rect_filled(badge, 10., badge_fill);
+    crate::icons::paint_icon(ui.painter(), badge.shrink(8.), icon, mark);
+    let x = badge.right() + 14.;
+    ui.painter().text(
+        egui::pos2(x, rect.center().y - 9.),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(15.),
+        ink,
+    );
+    ui.painter().text(
+        egui::pos2(x, rect.center().y + 11.),
+        egui::Align2::LEFT_CENTER,
+        detail,
+        egui::FontId::proportional(12.),
+        sub,
+    );
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 impl App {
     pub fn done_at(&mut self, i: usize, day: Option<NaiveDate>, value: bool) {
         let n = &self.data.notes[i];
@@ -74,41 +133,75 @@ impl App {
         }
         if let Some((i, d, value)) = self.extra.completion_scope {
             let mut open = true;
+            let n = &self.data.notes[i];
+            let first = n.date.unwrap_or(d);
+            let last = first + chrono::Duration::days(i64::from(n.duration.max(1)) - 1);
+            let title = n.title.clone();
+            let color = n.color;
+            let (verb, heading) = if value {
+                ("완료", "어디까지 완료할까요?")
+            } else {
+                ("완료 해제", "어디까지 완료를 해제할까요?")
+            };
+            let span = format!(
+                "{} ~ {}",
+                first.format("%-m월 %-d일"),
+                last.format("%-m월 %-d일")
+            );
+            let mut choice = None;
+            let mut cancel = false;
             crate::ui::dialog(
                 ctx,
                 "span_scope",
                 "기간 일정 완료",
-                [360., 220.],
+                [400., 290.],
                 true,
                 &mut open,
                 |ui| {
-                    ui.label(
-                        RichText::new(if value {
-                            "어느 일정을 완료할까요?"
-                        } else {
-                            "어느 일정의 완료를 해제할까요?"
-                        })
-                        .strong()
-                        .size(15.),
-                    );
-                    crate::ui::hint(ui, format!("{} · {}", self.data.notes[i].title, d));
-                    ui.add_space(10.);
+                    let tone = crate::ui::t(ui);
                     ui.horizontal(|ui| {
-                        if ui.button("이 날짜만").clicked() {
-                            self.complete_span(i, d, value, false, Local::now().naive_local());
-                            self.extra.completion_scope = None;
-                        }
-                        if ui.button("이 날짜 이후 모두").clicked() {
-                            self.complete_span(i, d, value, true, Local::now().naive_local());
-                            self.extra.completion_scope = None;
-                        }
+                        let (bar, _) =
+                            ui.allocate_exact_size(egui::vec2(5., 38.), egui::Sense::hover());
+                        ui.painter().rect_filled(bar, 3., color);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(heading).strong().size(16.).color(tone.ink));
+                            crate::ui::hint(ui, format!("{title}  ·  {span}"));
+                        });
                     });
-                    ui.add_space(6.);
-                    if ui.button("취소").clicked() {
-                        self.extra.completion_scope = None;
+                    ui.add_space(14.);
+                    let one = format!("{} 하루만 {verb}합니다", d.format("%-m월 %-d일"));
+                    if scope_card(ui, crate::icons::Icon::Today, "이 날짜만", &one, false).clicked()
+                    {
+                        choice = Some(false);
                     }
+                    ui.add_space(8.);
+                    let all = format!("{span} 모두 {verb}합니다");
+                    if scope_card(ui, crate::icons::Icon::Calendar, "전체 일정", &all, true)
+                        .clicked()
+                    {
+                        choice = Some(true);
+                    }
+                    ui.add_space(10.);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        cancel = ui.button("취소").clicked();
+                    });
                 },
             );
+            if let Some(all) = choice {
+                let now = Local::now().naive_local();
+                if all {
+                    self.complete_span(i, first, value, true, now);
+                    if self.active == i {
+                        self.extra.edit_occurrence = Some(d);
+                    }
+                } else {
+                    self.complete_span(i, d, value, false, now);
+                }
+                self.extra.completion_scope = None;
+            }
+            if cancel {
+                self.extra.completion_scope = None;
+            }
             if !open {
                 self.extra.completion_scope = None;
             }
@@ -192,290 +285,513 @@ impl App {
             cursor = self.extra.folders[p].parent;
         }
         self.extra.folders[folder].parent = parent;
+        if let Some(p) = parent {
+            self.set_folder_tab(folder, self.extra.folders[p].tab);
+        }
         true
     }
-    pub fn create_wiki_folder(&mut self) -> usize {
+    /// Move a folder (and everything in it) to the root of wiki `tab`.
+    pub fn move_folder_to_tab(&mut self, folder: usize, tab: usize) {
+        if folder < self.extra.folders.len() {
+            self.extra.folders[folder].parent = None;
+            self.set_folder_tab(folder, tab);
+        }
+    }
+    fn set_folder_tab(&mut self, folder: usize, tab: usize) {
+        self.extra.folders[folder].tab = tab;
+        for n in &mut self.data.notes {
+            if n.folder == Some(folder) {
+                n.wiki_tab = Some(tab);
+            }
+        }
+        let children: Vec<_> = (0..self.extra.folders.len())
+            .filter(|&c| self.extra.folders[c].parent == Some(folder))
+            .collect();
+        for c in children {
+            self.set_folder_tab(c, tab);
+        }
+    }
+    /// A new folder in the current wiki tab, under `parent` when that folder
+    /// belongs to this tab.
+    pub fn create_wiki_folder(&mut self, parent: Option<usize>) -> usize {
         let id = self.extra.folders.len();
+        let tab = self.extra.wiki_tab;
+        let parent = parent.filter(|&p| self.extra.folders[p].tab == tab);
         self.extra.folders.push(crate::extras::Folder {
             title: format!("새 폴더 {}", id + 1),
             description: String::new(),
-            parent: self.extra.folder_selected,
+            parent,
+            tab,
         });
         self.extra.folder_open.insert(id);
-        if let Some(p) = self.extra.folder_selected {
+        if let Some(p) = parent {
             self.extra.folder_open.insert(p);
         }
         id
     }
+    /// My wiki: tabs on top; on the left the tab's folder tree (①) over the
+    /// unfiled wiki memos (②); on the right two areas that show memos side
+    /// by side for comparison.
     pub fn wiki(&mut self, ui: &mut egui::Ui) {
+        if self.extra.wiki_tab >= self.extra.wiki_tabs.len() {
+            self.extra.wiki_tab = 0;
+        }
+        for pane in &mut self.extra.wiki_panes {
+            if pane.is_some_and(|i| i >= self.data.notes.len() || self.data.notes[i].deleted) {
+                *pane = None;
+            }
+        }
+        if self.extra.wiki_panes[1].is_none() {
+            self.extra.wiki_blank = false;
+        }
+        self.wiki_tabs_bar(ui);
+        ui.add_space(6.);
+        let tone = crate::ui::t(ui);
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().rect(
+            rect,
+            12.,
+            tone.bg,
+            egui::Stroke::new(1.0_f32, tone.line),
+            egui::StrokeKind::Inside,
+        );
+        let inner = rect.shrink(8.);
+        let left_w = (inner.width() * 0.22).clamp(210., 280.);
+        let left = egui::Rect::from_min_size(inner.min, Vec2::new(left_w, inner.height()));
+        let tree_h = (left.height() * 0.58).round();
+        let tree_rect = egui::Rect::from_min_size(left.min, Vec2::new(left_w, tree_h));
+        let unfiled_rect =
+            egui::Rect::from_min_max(egui::pos2(left.left(), left.top() + tree_h + 1.), left.max);
+        ui.painter().line_segment(
+            [
+                egui::pos2(left.left() + 6., left.top() + tree_h),
+                egui::pos2(left.right() - 6., left.top() + tree_h),
+            ],
+            egui::Stroke::new(1.0_f32, tone.line),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(left.right() + 4., rect.top()),
+                egui::pos2(left.right() + 4., rect.bottom()),
+            ],
+            egui::Stroke::new(1.0_f32, tone.line),
+        );
+        self.in_rect(ui, tree_rect, "wiki_tree_area", |a, ui| a.wiki_tree(ui));
+        self.in_rect(ui, unfiled_rect, "wiki_unfiled_area", |a, ui| {
+            a.wiki_unfiled(ui)
+        });
+        let right =
+            egui::Rect::from_min_max(egui::pos2(left.right() + 12., inner.top()), inner.max);
+        let gap = 10.;
+        let pane_w = (right.width() - gap) / 2.;
+        for k in 0..2 {
+            let pane = egui::Rect::from_min_size(
+                egui::pos2(right.left() + k as f32 * (pane_w + gap), right.top()),
+                Vec2::new(pane_w, right.height()),
+            );
+            self.in_rect(ui, pane, ("wiki_pane", k), |a, ui| a.wiki_pane(ui, k));
+        }
+        ui.allocate_rect(rect, egui::Sense::hover());
+    }
+    /// Run `add` in a child ui confined to `rect`.
+    fn in_rect(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        id: impl std::hash::Hash,
+        add: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(id)
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        child.set_clip_rect(ui.clip_rect().intersect(rect));
+        add(self, &mut child);
+    }
+    fn wiki_tabs_bar(&mut self, ui: &mut egui::Ui) {
+        let tone = crate::ui::t(ui);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.;
+            for t in 0..self.extra.wiki_tabs.len() {
+                if self.extra.wiki_rename == Some(crate::extras::WikiRename::Tab(t)) {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.extra.wiki_tabs[t]).desired_width(90.),
+                    );
+                    r.request_focus();
+                    if r.lost_focus() {
+                        self.extra.wiki_rename = None;
+                    }
+                    continue;
+                }
+                let on = self.extra.wiki_tab == t;
+                let text = egui::RichText::new(&self.extra.wiki_tabs[t])
+                    .size(13.)
+                    .color(if on { egui::Color32::WHITE } else { tone.ink });
+                let r = ui
+                    .add(
+                        egui::Button::new(text)
+                            .fill(if on { ACCENT } else { tone.accent_soft })
+                            .corner_radius(egui::CornerRadius {
+                                nw: 8,
+                                ne: 8,
+                                sw: 0,
+                                se: 0,
+                            })
+                            .min_size(Vec2::new(72., 30.)),
+                    )
+                    .on_hover_text("누르면 이 위키의 트리 보기 · 더블클릭: 이름 바꾸기");
+                // Switching tabs changes only the tree; open memos stay.
+                if r.clicked() {
+                    self.extra.wiki_tab = t;
+                    self.extra.folder_selected = None;
+                }
+                if r.double_clicked() {
+                    self.extra.wiki_rename = Some(crate::extras::WikiRename::Tab(t));
+                }
+                r.context_menu(|ui| {
+                    if ui.button("이름 바꾸기").clicked() {
+                        self.extra.wiki_rename = Some(crate::extras::WikiRename::Tab(t));
+                        ui.close_menu();
+                    }
+                });
+                self.targets.push(crate::dragging::Target {
+                    viewport: ui.ctx().viewport_id(),
+                    layer: ui.layer_id(),
+                    rect: r.rect.intersect(ui.clip_rect()),
+                    kind: crate::dragging::Destination::WikiTab(t),
+                });
+            }
             if ui
-                .add(egui::Button::new(RichText::new("+  새 폴더").strong()))
+                .add(
+                    egui::Button::new(egui::RichText::new("+").size(14.))
+                        .fill(tone.accent_soft)
+                        .min_size(Vec2::new(32., 30.)),
+                )
+                .on_hover_text("새 위키 탭")
                 .clicked()
             {
-                self.create_wiki_folder();
-            }
-            if crate::ui::pill(ui, self.extra.wiki_unfiled, "미분류만").clicked() {
-                self.extra.wiki_unfiled = !self.extra.wiki_unfiled;
-                self.extra.wiki_selected = None;
-            }
-            crate::ui::hint(
-                ui,
-                self.extra
-                    .folder_selected
-                    .map(|f| {
-                        format!(
-                            "새 폴더는 ‘{}’ 아래에 만들어집니다",
-                            self.extra.folders[f].title
-                        )
-                    })
-                    .unwrap_or("위키 메모를 왼쪽 폴더로 끌어 분류하세요".into()),
-            );
-        });
-        ui.add_space(12.);
-        let height = ui.available_height().max(320.);
-        let left_w = (ui.available_width() * 0.32).clamp(220., 300.);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(
-                Vec2::new(left_w, height),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    ui.set_width(left_w);
-                    self.wiki_sidebar(ui);
-                },
-            );
-            ui.add_space(18.);
-            ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), height),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    if let Some(i) = self
-                        .extra
-                        .wiki_selected
-                        .filter(|&i| self.visible(i) && self.data.notes[i].wiki)
-                    {
-                        self.wiki_article(ui, i);
-                    } else {
-                        self.wiki_list(ui);
-                    }
-                },
-            );
-        });
-    }
-    fn wiki_sidebar(&mut self, ui: &mut egui::Ui) {
-        let count = self.extra.folders.len();
-        crate::ui::section_header(ui, crate::icons::Icon::Folder, "폴더", Some(count));
-        crate::ui::card(ui, |ui| {
-            let all = self
-                .data
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| self.visible(*i) && n.wiki)
-                .count();
-            let (root, _) = crate::ui::tree_row(
-                ui,
-                ui.id().with("wiki_root"),
-                self.extra.folder_selected.is_none(),
-                None,
-                crate::icons::Icon::Book,
-                "모든 위키",
-                all,
-            );
-            let root = root.on_hover_text("여기로 놓으면 최상위 / 미분류");
-            if root.clicked() {
+                let n = self.extra.wiki_tabs.len() + 1;
+                self.extra.wiki_tabs.push(format!("위키 {n}"));
+                self.extra.wiki_tab = n - 1;
                 self.extra.folder_selected = None;
-                self.extra.wiki_selected = None;
             }
-            self.wiki_drop(ui, root.rect, None);
-            let roots: Vec<_> = self
-                .extra
-                .folders
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| f.parent.is_none())
-                .map(|(i, _)| i)
-                .collect();
-            if roots.is_empty() {
-                crate::ui::empty_state(
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(RichText::new("+  새 폴더").strong()))
+                    .clicked()
+                {
+                    self.create_wiki_folder(self.extra.folder_selected);
+                }
+                crate::ui::hint(
                     ui,
-                    crate::icons::Icon::Folder,
-                    "폴더가 없습니다",
-                    "‘+ 새 폴더’로 위키를 묶어 보세요",
-                );
-            }
-            for f in roots {
-                self.folder_tree(ui, f);
-            }
-        });
-        if let Some(f) = self.extra.folder_selected {
-            ui.add_space(14.);
-            crate::ui::section_header(ui, crate::icons::Icon::Edit, "폴더 정보", None);
-            crate::ui::card(ui, |ui| {
-                crate::ui::caption(ui, "제목");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.extra.folders[f].title)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(6.);
-                crate::ui::caption(ui, "설명");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.extra.folders[f].description)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY),
+                    "미분류 메모를 위 트리로 끌어 분류 · 트리에서 우클릭: 새 노트",
                 );
             });
+        });
+    }
+    /// ① The current tab's folders and filed memos.
+    fn wiki_tree(&mut self, ui: &mut egui::Ui) {
+        let tab = self.extra.wiki_tab;
+        let area = ui.max_rect();
+        // The empty part of the tree is the tab's root: drop and right-click.
+        let bg = ui.interact(area, ui.id().with("tree_bg"), egui::Sense::click());
+        self.targets.push(crate::dragging::Target {
+            viewport: ui.ctx().viewport_id(),
+            layer: ui.layer_id(),
+            rect: area.intersect(ui.clip_rect()),
+            kind: crate::dragging::Destination::WikiTab(tab),
+        });
+        let mut new_note = None;
+        let mut new_folder = None;
+        bg.context_menu(|ui| {
+            if ui.button("새 위키 노트").clicked() {
+                new_note = Some(None);
+                ui.close_menu();
+            }
+            if ui.button("새 폴더").clicked() {
+                new_folder = Some(None);
+                ui.close_menu();
+            }
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("wiki_tree_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(4.);
+                let roots: Vec<_> = (0..self.extra.folders.len())
+                    .filter(|&f| {
+                        self.extra.folders[f].parent.is_none() && self.extra.folders[f].tab == tab
+                    })
+                    .collect();
+                for f in roots {
+                    self.folder_tree(ui, f, &mut new_note, &mut new_folder);
+                }
+                let notes: Vec<_> = self
+                    .data
+                    .notes
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, n)| {
+                        self.visible(*i) && n.wiki && n.folder.is_none() && n.wiki_tab == Some(tab)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                for i in notes {
+                    self.wiki_note_row(ui, i, 30.);
+                }
+            });
+        if let Some(folder) = new_folder {
+            self.create_wiki_folder(folder);
+        }
+        if let Some(folder) = new_note {
+            let i = self.new_wiki_note(
+                folder.map_or(Some(tab), |f| Some(self.extra.folders[f].tab)),
+                folder,
+            );
+            self.wiki_open(i);
         }
     }
-    fn wiki_list(&mut self, ui: &mut egui::Ui) {
+    /// ② Wiki memos not filed in any tab, newest first.
+    fn wiki_unfiled(&mut self, ui: &mut egui::Ui) {
+        let tone = crate::ui::t(ui);
+        let area = ui.max_rect();
+        self.wiki_drop(ui, area, None);
         let mut ids: Vec<_> = self
             .data
             .notes
             .iter()
             .enumerate()
             .filter(|(i, n)| {
-                self.visible(*i)
-                    && n.wiki
-                    && (!self.extra.wiki_unfiled || n.folder.is_none())
-                    && self
-                        .extra
-                        .folder_selected
-                        .is_none_or(|f| n.folder == Some(f))
+                self.visible(*i) && n.wiki && n.folder.is_none() && n.wiki_tab.is_none()
             })
             .map(|(i, _)| i)
             .collect();
         ids.sort_by_key(|&i| std::cmp::Reverse(self.data.notes[i].created));
-        let title = match self.extra.folder_selected {
-            Some(f) => self.extra.folders[f].title.clone(),
-            None if self.extra.wiki_unfiled => "미분류 위키".into(),
-            None => "모든 위키".into(),
+        ui.add_space(8.);
+        ui.horizontal(|ui| {
+            ui.add_space(8.);
+            ui.label(RichText::new("미분류 위키").size(12.).color(tone.muted));
+            ui.label(
+                RichText::new(ids.len().to_string())
+                    .size(12.)
+                    .color(tone.faint),
+            );
+        });
+        ui.add_space(2.);
+        egui::ScrollArea::vertical()
+            .id_salt("wiki_unfiled_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if ids.is_empty() {
+                    ui.add_space(10.);
+                    crate::ui::hint(ui, "  메모의 ‘위키’ 표시를 켜면 여기에 모입니다");
+                }
+                for i in ids {
+                    self.wiki_note_row(ui, i, 28.);
+                }
+            });
+    }
+    fn wiki_note_row(&mut self, ui: &mut egui::Ui, i: usize, height: f32) {
+        let n = &self.data.notes[i];
+        let title = if n.title.trim().is_empty() {
+            "제목 없음".to_owned()
+        } else {
+            n.title.clone()
         };
-        crate::ui::section_header(ui, crate::icons::Icon::Book, &title, Some(ids.len()));
-        if let Some(f) = self.extra.folder_selected {
-            let d = &self.extra.folders[f].description;
-            if !d.trim().is_empty() {
-                crate::ui::hint(ui, d.clone());
-                ui.add_space(6.);
-            }
+        let meta = if n.wiki_comments.is_empty() {
+            String::new()
+        } else {
+            format!("댓글 {}", n.wiki_comments.len())
+        };
+        let open = self.extra.wiki_panes[self.extra.wiki_focus] == Some(i);
+        let r = crate::ui::list_row(
+            ui,
+            ui.id().with(("wiki_note", i)),
+            open,
+            Some(n.color),
+            &title,
+            &meta,
+            height,
+        )
+        .on_hover_text("누르면 선택한 영역에 열기 · 끌어서 분류");
+        self.drag_source(ui, &r, i, false);
+        if r.clicked() {
+            self.wiki_open(i);
         }
-        crate::ui::card(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if ids.is_empty() {
-                crate::ui::empty_state(
-                    ui,
-                    crate::icons::Icon::Book,
-                    "위키 메모가 없습니다",
-                    "메모의 ‘위키’ 표시를 켜면 여기에 모입니다",
-                );
+    }
+    /// A new, empty wiki memo filed in `tab` / `folder` (both `None`: unfiled).
+    fn new_wiki_note(&mut self, tab: Option<usize>, folder: Option<usize>) -> usize {
+        let i = self.data.notes.len();
+        let mut n = Note::new("", None, i);
+        n.body.clear();
+        n.wiki = true;
+        n.wiki_tab = tab;
+        n.folder = folder;
+        self.data.notes.push(n);
+        if let Some(f) = folder {
+            self.extra.folder_open.insert(f);
+        }
+        i
+    }
+    /// Show memo `i` in the selected area. While area 2 holds a memo that was
+    /// opened blank, picked memos go to area 1 so area 2 keeps it.
+    pub fn wiki_open(&mut self, i: usize) {
+        let k = if self.extra.wiki_blank {
+            0
+        } else {
+            self.extra.wiki_focus
+        };
+        self.extra.wiki_panes[k] = Some(i);
+    }
+    fn wiki_pane(&mut self, ui: &mut egui::Ui, k: usize) {
+        let tone = crate::ui::t(ui);
+        let rect = ui.max_rect();
+        let focused = self.extra.wiki_focus == k;
+        if ui.rect_contains_pointer(rect) && ui.input(|i| i.pointer.any_pressed()) {
+            self.extra.wiki_focus = k;
+        }
+        // Header: which area this is, and its tools.
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.set_min_height(26.);
+            let label = if k == 0 { "영역 1" } else { "영역 2" };
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.), egui::Sense::hover());
+            ui.painter().circle_filled(
+                dot.center(),
+                4.,
+                if focused { ACCENT } else { tone.line_strong },
+            );
+            ui.label(RichText::new(label).size(12.).color(if focused {
+                ACCENT
+            } else {
+                tone.muted
+            }));
+            if focused {
+                crate::ui::hint(ui, "· 고른 메모가 여기에 열립니다");
             }
-            for i in ids {
-                ui.push_id(("wiki_list", i), |ui| {
-                    let tone = crate::ui::t(ui);
-                    let (rect, r) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 56.),
-                        egui::Sense::click_and_drag(),
-                    );
-                    if r.hovered() {
-                        ui.painter().rect_filled(rect, 8., tone.hover);
+            if let Some(i) = self.extra.wiki_panes[k] {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::icons::small_icon(ui, crate::icons::Icon::Close, "영역 닫기")
+                        .clicked()
+                    {
+                        close = true;
                     }
-                    let n = &self.data.notes[i];
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(
-                            rect.left_top() + Vec2::new(8., 12.),
-                            Vec2::new(4., rect.height() - 24.),
-                        ),
-                        2.,
-                        n.color,
-                    );
-                    let x = rect.left() + 22.;
-                    let clip = egui::Rect::from_min_max(
-                        egui::pos2(x, rect.top()),
-                        egui::pos2(rect.right() - 8., rect.bottom()),
-                    );
-                    let painter = ui.painter().with_clip_rect(clip);
-                    painter.text(
-                        egui::pos2(x, rect.top() + 9.),
-                        egui::Align2::LEFT_TOP,
-                        &n.title,
-                        egui::FontId::proportional(14.5),
-                        tone.ink,
-                    );
-                    let folder = n
-                        .folder
-                        .map(|f| self.extra.folders[f].title.as_str())
-                        .unwrap_or("미분류");
-                    let first = if n.locked {
-                        "잠긴 메모"
-                    } else {
-                        n.body.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
-                    };
-                    painter.text(
-                        egui::pos2(x, rect.bottom() - 9.),
-                        egui::Align2::LEFT_BOTTOM,
-                        format!(
-                            "{folder}  ·  {}  ·  {}",
-                            n.created.format("%Y.%m.%d"),
-                            crate::shorten(first, 60)
-                        ),
-                        egui::FontId::proportional(11.5),
-                        tone.muted,
-                    );
-                    let r = r
-                        .on_hover_text("클릭: 읽기 · 더블클릭: 메모 열기 · 드래그: 폴더로 분류")
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    self.drag_source(ui, &r, i, false);
-                    if r.double_clicked() {
+                    let comments = self.data.notes[i].wiki_comments.len();
+                    let tip = format!("댓글 {comments}");
+                    if crate::icons::toggle_icon(
+                        ui,
+                        crate::icons::Icon::Notes,
+                        &tip,
+                        self.extra.wiki_comments[k],
+                    )
+                    .clicked()
+                    {
+                        self.extra.wiki_comments[k] = !self.extra.wiki_comments[k];
+                    }
+                    if crate::icons::small_icon(ui, crate::icons::Icon::Sticky, "스티커로 열기")
+                        .clicked()
+                    {
                         self.open_note(i);
-                    } else if r.clicked() {
-                        self.extra.wiki_selected = Some(i);
                     }
                 });
             }
         });
-    }
-    fn wiki_article(&mut self, ui: &mut egui::Ui, i: usize) {
-        let tone = crate::ui::t(ui);
-        ui.horizontal(|ui| {
-            if crate::icons::small_icon(ui, crate::icons::Icon::ChevronLeft, "목록으로").clicked()
-            {
-                self.extra.wiki_selected = None;
-            }
-            crate::ui::hint(ui, "위키 목록");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("메모 열기").clicked() {
-                    self.open_note(i);
-                }
-            });
-        });
-        ui.add_space(10.);
-        let n = &self.data.notes[i];
-        ui.label(RichText::new(&n.title).size(22.).strong().color(tone.ink));
-        ui.add_space(2.);
-        let folder = n
-            .folder
-            .map(|f| self.extra.folders[f].title.clone())
-            .unwrap_or("미분류".into());
-        crate::ui::hint(
-            ui,
-            format!(
-                "{folder}  ·  {} 작성  ·  댓글 {}",
-                n.created.format("%Y.%m.%d"),
-                n.wiki_comments.len()
-            ),
-        );
-        ui.add_space(10.);
-        crate::ui::divider(ui);
-        ui.add_space(12.);
-        if n.locked {
-            crate::ui::empty_state(ui, crate::icons::Icon::Lock, "잠긴 메모입니다", "");
-        } else {
-            let body = n.body.clone();
-            ui.label(RichText::new(body).size(14.5).color(tone.ink));
+        let body = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + 32.), rect.max);
+        if focused {
+            ui.painter().rect_stroke(
+                body.expand(1.),
+                19.,
+                egui::Stroke::new(1.5_f32, tone.accent_soft),
+                egui::StrokeKind::Outside,
+            );
         }
-        ui.add_space(20.);
-        crate::ui::section_header(ui, crate::icons::Icon::Notes, "댓글", None);
-        self.comments(ui, i, 0);
+        match self.extra.wiki_panes[k] {
+            Some(i) => {
+                let comments = self.extra.wiki_comments[k];
+                let note_h = if comments {
+                    (body.height() * 0.6).round()
+                } else {
+                    body.height()
+                };
+                let note = egui::Rect::from_min_size(body.min, Vec2::new(body.width(), note_h));
+                self.in_rect(ui, note, ("wiki_note_pane", k), |a, ui| {
+                    ui.set_height(note.height());
+                    a.inline_note(ui, i)
+                });
+                if comments {
+                    let area = egui::Rect::from_min_max(
+                        egui::pos2(body.left(), note.bottom() + 8.),
+                        body.max,
+                    );
+                    self.in_rect(ui, area, ("wiki_comments_pane", k), |a, ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("wiki_comments_scroll", k))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| a.comments(ui, i, 0));
+                    });
+                }
+            }
+            None => {
+                ui.painter().rect_filled(body, 18., tone.sidebar);
+                self.in_rect(ui, body, ("wiki_empty_pane", k), |a, ui| {
+                    ui.add_space(body.height() * 0.36);
+                    ui.vertical_centered(|ui| {
+                        if k == 1 {
+                            let (r, resp) =
+                                ui.allocate_exact_size(Vec2::splat(56.), egui::Sense::click());
+                            let fill = if resp.hovered() {
+                                tone.accent_soft
+                            } else {
+                                tone.bg
+                            };
+                            ui.painter().circle_filled(r.center(), 28., fill);
+                            crate::icons::paint_icon(
+                                ui.painter(),
+                                r.shrink(14.),
+                                crate::icons::Icon::Plus,
+                                ACCENT,
+                            );
+                            ui.add_space(8.);
+                            ui.label(RichText::new("빈 메모 열기").color(tone.muted));
+                            if resp
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                let i = a.new_wiki_note(None, None);
+                                a.extra.wiki_panes[1] = Some(i);
+                                a.extra.wiki_blank = true;
+                                a.extra.wiki_focus = 0;
+                            }
+                        } else {
+                            crate::ui::empty_state(
+                                ui,
+                                crate::icons::Icon::Book,
+                                "메모를 고르세요",
+                                "왼쪽 트리나 미분류 목록에서 메모를 누르면 여기에 열립니다",
+                            );
+                        }
+                    });
+                });
+            }
+        }
+        if close {
+            if let Some(i) = self.extra.wiki_panes[k].take() {
+                // A blank memo left empty is not kept.
+                let n = &self.data.notes[i];
+                if k == 1
+                    && self.extra.wiki_blank
+                    && n.title.trim().is_empty()
+                    && n.body.trim().is_empty()
+                {
+                    self.data.notes[i].deleted = true;
+                }
+            }
+            if k == 1 {
+                self.extra.wiki_blank = false;
+            }
+        }
     }
     fn wiki_drop(&mut self, ui: &egui::Ui, rect: egui::Rect, f: Option<usize>) {
         self.targets.push(crate::dragging::Target {
@@ -485,8 +801,13 @@ impl App {
             kind: crate::dragging::Destination::WikiFolder(f),
         });
     }
-    fn folder_tree(&mut self, ui: &mut egui::Ui, f: usize) {
-        let title = self.extra.folders[f].title.clone();
+    fn folder_tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        f: usize,
+        new_note: &mut Option<Option<usize>>,
+        new_folder: &mut Option<Option<usize>>,
+    ) {
         let open = self.extra.folder_open.contains(&f);
         let ids: Vec<_> = self
             .data
@@ -496,60 +817,75 @@ impl App {
             .filter(|(i, n)| self.visible(*i) && n.wiki && n.folder == Some(f))
             .map(|(i, _)| i)
             .collect();
-        let (r, toggled) = crate::ui::tree_row(
-            ui,
-            ui.id().with(("wiki_folder_row", f)),
-            self.extra.folder_selected == Some(f),
-            Some(open),
-            crate::icons::Icon::Folder,
-            &title,
-            ids.len(),
-        );
-        if toggled {
-            if open {
-                self.extra.folder_open.remove(&f);
-            } else {
-                self.extra.folder_open.insert(f);
+        if self.extra.wiki_rename == Some(crate::extras::WikiRename::Folder(f)) {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.extra.folders[f].title)
+                    .desired_width(f32::INFINITY),
+            );
+            r.request_focus();
+            if r.lost_focus() {
+                self.extra.wiki_rename = None;
             }
-        } else if r.clicked() {
-            self.extra.folder_selected = Some(f);
-            self.extra.wiki_selected = None;
+        } else {
+            let title = self.extra.folders[f].title.clone();
+            let (r, toggled) = crate::ui::tree_row(
+                ui,
+                ui.id().with(("wiki_folder_row", f)),
+                self.extra.folder_selected == Some(f),
+                Some(open),
+                crate::icons::Icon::Folder,
+                &title,
+                ids.len(),
+            );
+            if toggled || r.clicked() {
+                if open {
+                    self.extra.folder_open.remove(&f);
+                } else {
+                    self.extra.folder_open.insert(f);
+                }
+                self.extra.folder_selected = Some(f);
+            }
+            let description = self.extra.folders[f].description.clone();
+            let r = if description.trim().is_empty() {
+                r
+            } else {
+                r.on_hover_text(description)
+            };
+            r.context_menu(|ui| {
+                if ui.button("새 위키 노트").clicked() {
+                    *new_note = Some(Some(f));
+                    ui.close_menu();
+                }
+                if ui.button("새 하위 폴더").clicked() {
+                    *new_folder = Some(Some(f));
+                    ui.close_menu();
+                }
+                if ui.button("이름 바꾸기").clicked() {
+                    self.extra.wiki_rename = Some(crate::extras::WikiRename::Folder(f));
+                    ui.close_menu();
+                }
+            });
+            self.folder_source(ui, &r, f);
+            self.wiki_drop(ui, r.rect, Some(f));
         }
-        self.folder_source(ui, &r, f);
-        self.wiki_drop(ui, r.rect, Some(f));
         if open {
             ui.indent(("wiki_folder", f), |ui| {
+                // The folder's memo area also files dropped memos into it.
+                let top = ui.cursor().top();
                 for i in ids {
-                    let n = &self.data.notes[i];
-                    let meta = if n.wiki_comments.is_empty() {
-                        String::new()
-                    } else {
-                        format!("댓글 {}", n.wiki_comments.len())
-                    };
-                    let r = crate::ui::list_row(
-                        ui,
-                        ui.id().with(("wiki_note", i)),
-                        self.extra.wiki_selected == Some(i),
-                        Some(n.color),
-                        &n.title.clone(),
-                        &meta,
-                        30.,
-                    );
-                    self.drag_source(ui, &r, i, false);
-                    if r.clicked() {
-                        self.extra.wiki_selected = Some(i);
-                    }
+                    self.wiki_note_row(ui, i, 28.);
                 }
-                let children: Vec<_> = self
-                    .extra
-                    .folders
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| n.parent == Some(f))
-                    .map(|(i, _)| i)
+                let children: Vec<_> = (0..self.extra.folders.len())
+                    .filter(|&c| self.extra.folders[c].parent == Some(f))
                     .collect();
+                let notes_bottom = ui.cursor().top();
+                if notes_bottom > top {
+                    let area =
+                        egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=notes_bottom);
+                    self.wiki_drop(ui, area, Some(f));
+                }
                 for c in children {
-                    self.folder_tree(ui, c);
+                    self.folder_tree(ui, c, new_note, new_folder);
                 }
             });
         }
@@ -728,17 +1064,44 @@ mod tests {
     #[test]
     fn new_folder_keeps_context_for_multiple_siblings() {
         let mut a = app();
-        a.extra.folder_selected = None;
-        let x = a.create_wiki_folder();
-        let y = a.create_wiki_folder();
+        let x = a.create_wiki_folder(None);
+        let y = a.create_wiki_folder(None);
         assert_eq!(a.extra.folders[x].parent, None);
         assert_eq!(a.extra.folders[y].parent, None);
-        a.extra.folder_selected = Some(x);
-        let z = a.create_wiki_folder();
+        let z = a.create_wiki_folder(Some(x));
         assert_eq!(a.extra.folders[z].parent, Some(x));
         assert!(!a.move_folder(x, Some(z)));
         assert_eq!(a.extra.folders[x].parent, None);
         assert!(a.move_folder(y, Some(x)));
+    }
+    #[test]
+    fn wiki_areas_keep_a_blank_memo_in_area_two_and_tabs_only_change_the_tree() {
+        let mut a = app();
+        a.data.notes[1].wiki = true;
+        a.extra.wiki_focus = 1;
+        a.wiki_open(0);
+        assert_eq!(a.extra.wiki_panes, [None, Some(0)]);
+        // A blank memo in area 2 stays; picked memos then go to area 1.
+        let blank = a.new_wiki_note(None, None);
+        a.extra.wiki_panes[1] = Some(blank);
+        a.extra.wiki_blank = true;
+        a.extra.wiki_focus = 1;
+        a.wiki_open(1);
+        assert_eq!(a.extra.wiki_panes, [Some(1), Some(blank)]);
+        let n = &a.data.notes[blank];
+        assert!(n.wiki && n.folder.is_none() && n.wiki_tab.is_none());
+        // A second tab: folders made there and moved there follow the tab.
+        a.extra.wiki_tabs.push("위키 2".into());
+        a.extra.wiki_tab = 1;
+        let f = a.create_wiki_folder(Some(0));
+        assert_eq!(
+            (a.extra.folders[f].tab, a.extra.folders[f].parent),
+            (1, None)
+        );
+        a.move_folder_to_tab(0, 1);
+        assert_eq!(a.extra.folders[0].tab, 1);
+        assert_eq!(a.data.notes[0].wiki_tab, Some(1));
+        assert_eq!(a.extra.wiki_panes, [Some(1), Some(blank)]);
     }
     #[test]
     fn three_day_scope_does_not_complete_without_choice() {

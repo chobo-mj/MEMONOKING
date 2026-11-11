@@ -24,6 +24,9 @@ pub struct Note {
     pub created: NaiveDateTime,
     pub wiki: bool,
     pub folder: Option<usize>,
+    /// Wiki tab the memo is filed in (at the tab's root unless `folder`).
+    /// `None` with no folder: an unfiled wiki memo.
+    pub wiki_tab: Option<usize>,
     pub wiki_comments: Vec<String>,
     pub journal_comments: Vec<String>,
     pub color: eframe::egui::Color32,
@@ -60,6 +63,7 @@ impl Note {
             created: Local::now().naive_local(),
             wiki: false,
             folder: None,
+            wiki_tab: None,
             wiki_comments: vec![],
             journal_comments: vec![],
             color: crate::PALETTE[i % 10],
@@ -202,6 +206,7 @@ impl Workspace {
         notes[0].starred = true;
         notes[0].wiki = true;
         notes[0].folder = Some(0);
+        notes[0].wiki_tab = Some(0);
         notes[0].project = Some(0);
         notes[1].project = Some(0);
         notes[5].recurring = true;

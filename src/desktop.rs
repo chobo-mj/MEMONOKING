@@ -802,14 +802,14 @@ impl App {
                 );
                 section(ui, "새 스티커 메모 크기");
                 let mut preset = match self.desktop.sticker_size {
-                    s if s == Vec2::new(280., 240.) => 0,
+                    s if s == Vec2::new(340., 240.) => 0,
                     s if s == Vec2::splat(360.) => 1,
                     s if s == Vec2::new(460., 440.) => 2,
                     _ => 3,
                 };
                 if segmented(ui, &mut preset, &["작게", "보통", "크게", "직접 설정"]) {
                     match preset {
-                        0 => self.desktop.sticker_size = Vec2::new(280., 240.),
+                        0 => self.desktop.sticker_size = Vec2::new(340., 240.),
                         1 => self.desktop.sticker_size = Vec2::splat(360.),
                         2 => self.desktop.sticker_size = Vec2::new(460., 440.),
                         _ => {}

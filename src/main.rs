@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod calendar_dock;
 mod catalog;
 mod composer;
 mod content_collections;
@@ -56,7 +57,7 @@ struct App {
     search: String,
     editor: bool,
     sticky: bool,
-    floating: bool,
+    cal: calendar_dock::Dock,
     capture: bool,
     capture_text: String,
     settings: bool,
@@ -147,7 +148,7 @@ impl App {
             search: String::new(),
             editor: false,
             sticky: false,
-            floating: false,
+            cal: calendar_dock::Dock::default(),
             capture: false,
             capture_text: String::new(),
             settings: false,
@@ -179,13 +180,16 @@ impl App {
         }
     }
     fn theme(&self, ctx: &egui::Context) {
+        self.theme_with(ctx, self.dark);
+    }
+    fn theme_with(&self, ctx: &egui::Context, dark: bool) {
         let selected = egui::FontFamily::Name(self.desktop.font.clone().into());
         let family = if ctx.fonts(|f| f.families().contains(&selected)) {
             selected
         } else {
             egui::FontFamily::Proportional
         };
-        ui::apply(ctx, self.dark, family, self.desktop.font_size * 4. / 3.);
+        ui::apply(ctx, dark, family, self.desktop.font_size * 4. / 3.);
     }
     fn apply_shortcuts(&mut self) {
         let parsed = self
@@ -327,7 +331,7 @@ impl eframe::App for App {
                 } else if self.registered.get(2).is_some_and(|h| h.id() == e.id) {
                     self.new_sticker();
                 } else if self.registered.get(1).is_some_and(|h| h.id() == e.id) {
-                    self.floating = true;
+                    self.show_calendar();
                     ctx.send_viewport_cmd_to(
                         egui::ViewportId::from_hash_of("calendar"),
                         egui::ViewportCommand::Minimized(false),
@@ -344,33 +348,7 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE)
             .show(ctx, |_| {});
         self.main_window(ctx);
-        if self.floating {
-            let mut open = true;
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("calendar"),
-                egui::ViewportBuilder::default()
-                    .with_title("MEMONOKING · 캘린더")
-                    .with_inner_size([860., 760.])
-                    .with_min_inner_size([480., 420.]),
-                |ctx, _| {
-                    self.theme(ctx);
-                    self.drag_input(ctx);
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        open = false;
-                    }
-                    egui::CentralPanel::default()
-                        .frame(
-                            egui::Frame::NONE
-                                .fill(ctx.style().visuals.panel_fill)
-                                .inner_margin(egui::Margin::symmetric(20, 16)),
-                        )
-                        .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| self.calendar(ui));
-                        });
-                },
-            );
-            self.floating = open;
-        }
+        self.calendar_dock(ctx);
         self.daily_today(ctx);
         self.monitor_picker(ctx);
         self.apply_arrangement(ctx);
@@ -526,7 +504,7 @@ impl App {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::icon_button(ui, icons::Icon::Detach, "캘린더 분리창").clicked() {
-                    self.floating = true;
+                    self.show_calendar();
                 }
                 if icons::icon_button(
                     ui,

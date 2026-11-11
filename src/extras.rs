@@ -6,6 +6,14 @@ pub struct Folder {
     pub title: String,
     pub description: String,
     pub parent: Option<usize>,
+    /// The wiki tab whose tree holds this folder.
+    pub tab: usize,
+}
+/// What is being renamed in the wiki tree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WikiRename {
+    Tab(usize),
+    Folder(usize),
 }
 pub struct Picker {
     pub owner: egui::ViewportId,
@@ -52,13 +60,22 @@ pub struct Extra {
     pub delete_notes: bool,
     pub folders: Vec<Folder>,
     pub folder_selected: Option<usize>,
-    pub wiki_selected: Option<usize>,
+    /// Wiki tab names; each tab has its own folder tree.
+    pub wiki_tabs: Vec<String>,
+    pub wiki_tab: usize,
+    /// Memos open in wiki area 1 and area 2.
+    pub wiki_panes: [Option<usize>; 2],
+    /// The area the next picked memo opens in.
+    pub wiki_focus: usize,
+    /// Area 2 holds a memo opened blank; it stays until area 2 is closed.
+    pub wiki_blank: bool,
+    pub wiki_comments: [bool; 2],
+    pub wiki_rename: Option<WikiRename>,
     pub tree_selected: Option<usize>,
     pub drafts: HashMap<(usize, usize, Option<NaiveDate>), String>,
     pub draft_documents: HashMap<(usize, usize, Option<NaiveDate>), crate::composer::Document>,
     pub comment_documents:
         HashMap<(usize, usize, Option<NaiveDate>, usize), crate::composer::Document>,
-    pub wiki_unfiled: bool,
     pub folder_open: HashSet<usize>,
     pub completion_scope: Option<(usize, NaiveDate, bool)>,
     pub comment_occurrence: Option<NaiveDate>,
@@ -109,14 +126,20 @@ impl Default for Extra {
                 title: "내 지식".into(),
                 description: "업무 중 쌓인 참고 정보".into(),
                 parent: None,
+                tab: 0,
             }],
             folder_selected: None,
-            wiki_selected: None,
+            wiki_tabs: vec!["위키 1".into()],
+            wiki_tab: 0,
+            wiki_panes: [None; 2],
+            wiki_focus: 0,
+            wiki_blank: false,
+            wiki_comments: [false; 2],
+            wiki_rename: None,
             tree_selected: None,
             drafts: HashMap::new(),
             draft_documents: HashMap::new(),
             comment_documents: HashMap::new(),
-            wiki_unfiled: false,
             folder_open: HashSet::from([0]),
             completion_scope: None,
             comment_occurrence: None,

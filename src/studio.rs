@@ -246,14 +246,27 @@ impl App {
         if !self.desktop.daily_today {
             return;
         }
-        let day = (Local::now().naive_local() - chrono::Duration::hours(5)).date();
-        if self.desktop.daily_shown == Some(day) {
+        let today = daily_day(daily_now());
+        if self.desktop.daily_shown == Some(today) {
             return;
         }
-        self.desktop.daily_shown = Some(day);
-        let today = Local::now().date_naive();
-        let due: Vec<_> = self
-            .data
+        self.desktop.daily_shown = Some(today);
+        let due = self.daily_due(today);
+        if due.is_empty() {
+            return;
+        }
+        for i in due {
+            self.open_sticker(i, Some(today));
+        }
+        self.arrange = Some(Arrange {
+            layout: Layout::Right,
+            fold: Some(Mode::Title),
+            area: self.arrange_area(ctx),
+        });
+    }
+    /// Uncompleted memos of earlier days plus the memos of `today`.
+    fn daily_due(&self, today: NaiveDate) -> Vec<usize> {
+        self.data
             .notes
             .iter()
             .enumerate()
@@ -266,18 +279,7 @@ impl App {
                     })
             })
             .map(|(i, _)| i)
-            .collect();
-        if due.is_empty() {
-            return;
-        }
-        for i in due {
-            self.open_sticker(i, Some(today));
-        }
-        self.arrange = Some(Arrange {
-            layout: Layout::Right,
-            fold: Some(Mode::Title),
-            area: self.arrange_area(ctx),
-        });
+            .collect()
     }
     /// Big numbered windows on every monitor; clicking one makes it the
     /// monitor stickers are arranged on.
@@ -670,6 +672,26 @@ impl App {
     }
 }
 
+/// The day the daily memos belong to: a new day starts at 05:00.
+fn daily_day(now: chrono::NaiveDateTime) -> NaiveDate {
+    (now - chrono::Duration::hours(5)).date()
+}
+/// Local time for the daily memos. `MEMONOKING_TEST_NOW`
+/// (`YYYY-MM-DD HH:MM:SS`) starts a test clock at that time instead of the
+/// system clock, so the 05:00 rollover can be tried without changing Windows.
+fn daily_now() -> chrono::NaiveDateTime {
+    static START: std::sync::OnceLock<Option<(chrono::NaiveDateTime, std::time::Instant)>> =
+        std::sync::OnceLock::new();
+    let start = START.get_or_init(|| {
+        let text = std::env::var("MEMONOKING_TEST_NOW").ok()?;
+        let at = chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S").ok()?;
+        Some((at, std::time::Instant::now()))
+    });
+    match start {
+        Some((at, since)) => *at + chrono::Duration::from_std(since.elapsed()).unwrap_or_default(),
+        None => Local::now().naive_local(),
+    }
+}
 /// Which menu a sticker shows in its menu window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuKind {
@@ -758,15 +780,15 @@ fn submenu_row(ui: &mut egui::Ui, label: &str, open: bool) -> egui::Response {
     );
     r
 }
-struct Shown<R> {
-    size: Vec2,
-    focused: bool,
-    escape: bool,
-    result: Option<R>,
+pub(crate) struct Shown<R> {
+    pub size: Vec2,
+    pub focused: bool,
+    pub escape: bool,
+    pub result: Option<R>,
 }
 /// One borderless always-on-top menu window at `pos`; it resizes itself to
 /// its content.
-fn menu_window<R>(
+pub(crate) fn menu_window<R>(
     ctx: &egui::Context,
     id: egui::ViewportId,
     pos: Pos2,
@@ -1864,6 +1886,26 @@ mod occurrence_window_tests {
 #[cfg(test)]
 mod arrangement_tests {
     use super::*;
+    #[test]
+    fn daily_memos_roll_over_at_five_and_pick_open_past_and_today() {
+        let at = |d: u32, h: u32, m: u32| {
+            NaiveDate::from_ymd_opt(2026, 11, d)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap()
+        };
+        let d = |day: u32| NaiveDate::from_ymd_opt(2026, 11, day).unwrap();
+        assert_eq!(daily_day(at(12, 4, 59)), d(11));
+        assert_eq!(daily_day(at(12, 5, 0)), d(12));
+        let mut a = App::sample(d(11));
+        let all = a.daily_due(d(12));
+        // Sample memos of the 11th are still open; the 12th's memo is due.
+        assert!(all.contains(&0) && all.contains(&2));
+        a.done(0, true);
+        assert!(!a.daily_due(d(12)).contains(&0));
+        // Memos for later days are not shown early.
+        assert!(!a.daily_due(d(11)).contains(&2));
+    }
     #[test]
     fn submenus_open_outside_their_menu_right_first_then_left() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000., 800.));
