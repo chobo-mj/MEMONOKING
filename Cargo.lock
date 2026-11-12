@@ -2898,6 +2898,7 @@ dependencies = [
  "arboard",
  "chrono",
  "eframe",
+ "ego-tree",
  "fontdue",
  "global-hotkey",
  "ico",

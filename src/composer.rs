@@ -80,6 +80,73 @@ impl Table {
         }
         t
     }
+    /// Build a table from clipboard HTML (the real `<table>...</table>`
+    /// markup that Excel/한글/Word place alongside their plain-text TSV
+    /// rendering). Reading each `<td>`/`<th>` as its own cell means a cell's
+    /// own tabs or line breaks never get mistaken for a column or row
+    /// boundary the way they do with `from_tsv`. A horizontally merged cell
+    /// (`colspan`) is padded with blank cells so every row still lines up
+    /// column-for-column; a vertical merge (`rowspan`) is not reconstructed
+    /// across rows, so only the merged cell's own text survives, not the
+    /// merge itself — this type has no notion of a cell spanning rows.
+    pub fn from_html(html: &str) -> Option<Self> {
+        let doc = scraper::Html::parse_fragment(html);
+        let table_sel = scraper::Selector::parse("table").ok()?;
+        let table_el = doc.select(&table_sel).next()?;
+        let row_sel = scraper::Selector::parse("tr").ok()?;
+        let cell_sel = scraper::Selector::parse("td, th").ok()?;
+        let rows: Vec<Vec<String>> = table_el
+            .select(&row_sel)
+            .take(100)
+            .map(|tr| {
+                let mut cells = Vec::new();
+                for cell in tr.select(&cell_sel).take(20) {
+                    let span = cell
+                        .value()
+                        .attr("colspan")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(1)
+                        .clamp(1, 20);
+                    cells.push(cell_text(cell));
+                    for _ in 1..span {
+                        cells.push(String::new());
+                    }
+                }
+                cells
+            })
+            .filter(|r| !r.is_empty())
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let cols = rows.iter().map(Vec::len).max().unwrap_or(1);
+        let mut t = Self::new(rows.len(), cols);
+        for (r, row) in rows.into_iter().enumerate() {
+            for (c, text) in row.into_iter().enumerate() {
+                t.cells[r][c].text = text;
+            }
+        }
+        Some(t)
+    }
+}
+/// A table cell's visible text, with `<br>` turned into a newline so a
+/// wrapped cell survives the round trip instead of its lines running
+/// together.
+fn cell_text(cell: scraper::ElementRef) -> String {
+    fn walk(node: ego_tree::NodeRef<scraper::node::Node>, out: &mut String) {
+        match node.value() {
+            scraper::node::Node::Text(t) => out.push_str(t),
+            scraper::node::Node::Element(e) if e.name() == "br" => out.push('\n'),
+            _ => {
+                for child in node.children() {
+                    walk(child, out);
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(*cell, &mut out);
+    out.trim().to_owned()
 }
 /// An image stored in a tab. It is shown inline wherever its placeholder
 /// character (`placeholder(id)`) appears in the tab's text, so it moves,
@@ -573,24 +640,44 @@ fn content_impl(
         let mut table_pasted = false;
         let text_pasted = paste.is_some();
         if let Some(paste) = paste.filter(|t| t.contains('\t') && t.len() < 1024 * 1024) {
-            doc.tabs[doc.active]
-                .blocks
-                .push(Block::Table(Table::from_tsv(&paste)));
+            // Excel/한글/Word put both a plain TSV rendering and the real
+            // `<table>` markup on the clipboard. TSV alone breaks on a cell
+            // that itself contains a tab or line break (common with wrapped
+            // cells), so prefer the HTML when it is there and parses.
+            let table = arboard::Clipboard::new()
+                .and_then(|mut c| c.get().html())
+                .ok()
+                .and_then(|html| Table::from_html(&html))
+                .unwrap_or_else(|| Table::from_tsv(&paste));
+            doc.tabs[doc.active].blocks.push(Block::Table(table));
             ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
             table_pasted = true;
         }
         if !table_pasted && !text_pasted && paste_chord(ui, text_id) {
-            if let Ok(picture) = picture_from_clipboard(doc.image_scale, doc.image_fit) {
-                pending_cursor =
-                    Some(doc.tabs[doc.active].insert_picture(old_range.clone(), picture));
-                ui.input_mut(|i| {
-                    i.events.retain(|e| {
-                        !matches!(
-                            e,
-                            egui::Event::Paste(_) | egui::Event::Key { key: Key::V, .. }
-                        )
-                    })
-                });
+            // egui's own Paste(text) event can arrive a frame or more after
+            // this key-down edge, so `text_pasted` above does not yet know
+            // whether this same Ctrl+V is about to deliver table/text too.
+            // A table clipboard (e.g. from Excel) also carries an image
+            // representation; without this check that image would land here
+            // first and the text would still turn into a second, separate
+            // paste once its event finally showed up. Read the clipboard's
+            // own text synchronously instead of waiting on that event.
+            let clipboard_has_text = arboard::Clipboard::new()
+                .and_then(|mut c| c.get_text())
+                .is_ok_and(|t| !t.trim().is_empty());
+            if !clipboard_has_text {
+                if let Ok(picture) = picture_from_clipboard(doc.image_scale, doc.image_fit) {
+                    pending_cursor =
+                        Some(doc.tabs[doc.active].insert_picture(old_range.clone(), picture));
+                    ui.input_mut(|i| {
+                        i.events.retain(|e| {
+                            !matches!(
+                                e,
+                                egui::Event::Paste(_) | egui::Event::Key { key: Key::V, .. }
+                            )
+                        })
+                    });
+                }
             }
         }
         if let Some(id) = doc.selected_picture {
@@ -2375,6 +2462,30 @@ mod tests {
         assert_eq!(d.tabs[0].body, "처음");
         assert_eq!(d.trash[0].body, "둘째");
         assert_eq!(d.active, 0);
+    }
+    #[test]
+    fn html_table_keeps_multiline_cells_and_pads_merged_columns() {
+        let html = "<table>\
+            <tr><td colspan=\"2\">제목</td></tr>\
+            <tr><td>첫 줄<br>둘째 줄</td><td>가\t나</td></tr>\
+            </table>";
+        let t = Table::from_html(html).expect("table parses");
+        assert_eq!(t.cells.len(), 2);
+        assert_eq!(t.cells[0].len(), 2, "colspan=2 pads a blank second cell");
+        assert_eq!(t.cells[0][0].text, "제목");
+        assert_eq!(t.cells[0][1].text, "");
+        assert_eq!(
+            t.cells[1][0].text, "첫 줄\n둘째 줄",
+            "<br> becomes a newline instead of running the lines together"
+        );
+        assert_eq!(
+            t.cells[1][1].text, "가\t나",
+            "a tab inside a cell's own text is not mistaken for a column boundary"
+        );
+    }
+    #[test]
+    fn non_table_html_falls_back_to_none() {
+        assert!(Table::from_html("<p>표가 아닙니다</p>").is_none());
     }
     #[test]
     fn indentation_continues_same_level_and_returns_to_known_family() {
