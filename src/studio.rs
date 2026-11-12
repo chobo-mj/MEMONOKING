@@ -1573,6 +1573,14 @@ impl App {
             if response.secondary_clicked() {
                 open_menu(ctx, w);
             }
+            // The header's gap is blank only in Sticker mode (Editor shows
+            // "메모 편집" there), so this is the sticker's one unambiguous
+            // empty area: double-clicking it toggles fullscreen, mirroring
+            // the native title-bar gesture.
+            if mode == Mode::Sticker && response.double_clicked() {
+                w.native.cancel();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
             if engaged {
                 let r = icon_button(ui, Icon::More, "더보기");
                 if r.clicked() {
