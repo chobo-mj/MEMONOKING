@@ -527,8 +527,7 @@ impl App {
             .with_decorations(false)
             .with_resizable(false)
             .with_taskbar(false)
-            .with_transparent(true)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop);
+            .with_transparent(true);
         let mut open = false;
         let mut menu_at = None;
         ctx.show_viewport_immediate(
