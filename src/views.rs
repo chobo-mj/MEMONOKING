@@ -37,7 +37,7 @@ impl App {
                 self.extra.show_done = !self.extra.show_done;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui::primary(ui, "+ 새 메모").clicked() {
+                if ui::primary(ui, "+ 새 일정").clicked() {
                     self.add_note(Some(match self.page {
                         2 => Local::now().date_naive(),
                         3 => Local::now().date_naive() + Duration::days(1),
@@ -1568,5 +1568,23 @@ mod band_tests {
             }
         );
         assert_eq!(assign_lanes(&segs), vec![0, 1, 1]);
+    }
+}
+#[cfg(test)]
+mod schedule_button_tests {
+    use super::*;
+    #[test]
+    fn new_schedule_button_creates_a_dated_note_and_opens_its_editor() {
+        let today = Local::now().date_naive();
+        let mut a = App::sample(today);
+        let before = a.data.notes.len();
+        a.add_note(Some(today));
+        assert_eq!(a.data.notes.len(), before + 1);
+        let i = before;
+        assert_eq!(a.data.notes[i].date, Some(today));
+        // "+ 새 일정" opens the memo editor window, not just a bare sticker.
+        assert!(a.editor);
+        assert_eq!(a.active, i);
+        assert!(a.studio.windows.contains_key(&i));
     }
 }
