@@ -471,18 +471,9 @@ fn picture_texture(
         picture.height,
         &picture.file,
     ));
-    if let Some(texture) = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(id)) {
-        return Ok(texture);
-    }
     // A small thumbnail, not the full picture.
-    let thumb = crate::storage::thumbnail(picture).ok_or("이미지를 읽을 수 없습니다")?;
-    let texture = ui.ctx().load_texture(
-        format!("document-image-{}-{}-{}", source.0, source.1, source.2),
-        thumb,
-        egui::TextureOptions::LINEAR,
-    );
-    ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
-    Ok(texture)
+    crate::lists::texture(ui.ctx(), id, || crate::storage::thumbnail(picture))
+        .ok_or_else(|| "이미지를 읽을 수 없습니다".into())
 }
 
 fn safe_stem(name: &str) -> String {

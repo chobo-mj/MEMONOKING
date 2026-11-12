@@ -77,8 +77,16 @@ struct App {
     tray: tray::Tray,
     /// The main window is shown (hidden in the tray otherwise).
     main_open: bool,
+    /// Until when (egui time) the one-time "running in the tray" notice shows.
+    tray_notice: Option<f64>,
     /// Filtered and sorted memo lists, reused until something changes.
     lists: lists::Cache,
+    /// Input counter last seen and when it last moved (egui time).
+    seen_input: (u64, f64),
+    /// When hourly housekeeping last ran (egui time).
+    tidied: f64,
+    /// When unused picture textures were last released.
+    textures_checked: f64,
     settings: bool,
     month: NaiveDate,
     day: NaiveDate,
@@ -105,10 +113,25 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut fonts = egui::FontDefinitions::default();
-        if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/malgun.ttf") {
+        // Font files are mapped, not read: each file is shared by the faces
+        // that come from it and only the parts in use occupy memory.
+        let mut mapped: std::collections::HashMap<&str, &'static [u8]> = Default::default();
+        let mut font_file = |file: &'static str| -> Option<&'static [u8]> {
+            if let Some(bytes) = mapped.get(file) {
+                return Some(bytes);
+            }
+            let f = std::fs::File::open(format!("C:/Windows/Fonts/{file}")).ok()?;
+            // SAFETY: read-only map of a system font file, kept for the
+            // whole run; Windows does not let a mapped file be rewritten.
+            let map = unsafe { memmap2::Mmap::map(&f) }.ok()?;
+            let bytes: &'static [u8] = Box::leak(Box::new(map));
+            mapped.insert(file, bytes);
+            Some(bytes)
+        };
+        if let Some(bytes) = font_file("malgun.ttf") {
             fonts
                 .font_data
-                .insert("korean".into(), egui::FontData::from_owned(bytes).into());
+                .insert("korean".into(), egui::FontData::from_static(bytes).into());
             fonts
                 .families
                 .get_mut(&egui::FontFamily::Proportional)
@@ -123,8 +146,8 @@ impl App {
             ("바탕", "batang.ttc", 0),
             ("궁서체", "batang.ttc", 2),
         ] {
-            if let Ok(bytes) = std::fs::read(format!("C:/Windows/Fonts/{file}")) {
-                let mut data = egui::FontData::from_owned(bytes);
+            if let Some(bytes) = font_file(file) {
+                let mut data = egui::FontData::from_static(bytes);
                 data.index = index;
                 fonts.font_data.insert(name.into(), data.into());
                 fonts.families.insert(
@@ -183,7 +206,11 @@ impl App {
             autostart_applied: None,
             tray: tray::Tray::default(),
             main_open: true,
+            tray_notice: None,
             lists: lists::Cache::default(),
+            seen_input: (0, 0.),
+            tidied: f64::MIN,
+            textures_checked: 0.,
             settings: false,
             month: today.with_day(1).unwrap(),
             day: today,
@@ -359,7 +386,19 @@ impl eframe::App for App {
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.theme(ctx);
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // The tick polls global shortcuts, the tray and alarms. It slows
+        // down after ten seconds without input; any input repaints at once.
+        let now = ctx.input(|i| i.time);
+        let changes = lists::CHANGES.load(std::sync::atomic::Ordering::Relaxed);
+        if changes != self.seen_input.0 {
+            self.seen_input = (changes, now);
+        }
+        let tick = if now - self.seen_input.1 < 10. {
+            100
+        } else {
+            250
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(tick));
         while let Ok(e) = GlobalHotKeyEvent::receiver().try_recv() {
             if e.state == HotKeyState::Pressed {
                 // Quick memo and new sticker both open a new sticker memo.
@@ -414,12 +453,91 @@ impl eframe::App for App {
         self.extra_windows(ctx);
         self.desktop_dialogs(ctx);
         self.check_alarms(ctx);
+        self.tray_notice(ctx);
+        // The program stays in the tray for days: old trash is emptied and
+        // unused picture textures are released while it runs.
+        let now = ctx.input(|i| i.time);
+        if now - self.tidied >= 3600. {
+            self.tidied = now;
+            self.purge_expired_trash(Local::now().naive_local());
+        }
+        if now - self.textures_checked >= 10. {
+            self.textures_checked = now;
+            lists::release_textures(ctx);
+            let before = now - lists::TEXTURE_KEEP;
+            for n in self.data.notes.untracked_mut() {
+                let d = &mut n.document;
+                for tab in d.tabs.iter_mut().chain(d.trash.iter_mut()) {
+                    for b in &mut tab.blocks {
+                        if let composer::Block::Picture(p) = b {
+                            p.release_texture(before);
+                        }
+                    }
+                }
+            }
+        }
         self.auto_relock();
         self.apply_autostart();
         self.autosave(ctx.input(|i| i.time), false);
     }
 }
 impl App {
+    /// Shown once, the first time the main window is closed to the tray.
+    fn tray_notice(&mut self, ctx: &egui::Context) {
+        let Some(until) = self.tray_notice else {
+            return;
+        };
+        if ctx.input(|i| i.time) > until || self.main_open {
+            self.tray_notice = None;
+            return;
+        }
+        let size = egui::vec2(380., 96.);
+        let area = native_window::work_area(ctx).unwrap_or(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280., 800.),
+        ));
+        let builder = egui::ViewportBuilder::default()
+            .with_title("OmniMemoJang")
+            .with_position(area.right_bottom() - size - egui::Vec2::splat(16.))
+            .with_inner_size(size)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_window_level(egui::WindowLevel::AlwaysOnTop);
+        let mut close = false;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("tray_notice"),
+            builder,
+            |ctx, _| {
+                self.theme(ctx);
+                let tone = ui::tone(self.dark);
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::NONE
+                            .fill(tone.bg)
+                            .stroke(egui::Stroke::new(1.0_f32, tone.line))
+                            .inner_margin(egui::Margin::symmetric(14, 10)),
+                    )
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new("OmniMemoJang은 트레이에서 계속 실행됩니다")
+                                .strong()
+                                .size(14.),
+                        );
+                        ui::hint(
+                            ui,
+                            "스티커 메모는 바탕화면에 남습니다 · 트레이 아이콘 클릭: 열기 · 우클릭: 종료",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            close = ui.button("확인").clicked();
+                        });
+                    });
+            },
+        );
+        if close {
+            self.tray_notice = None;
+        }
+    }
     fn main_window(&mut self, root: &egui::Context) {
         if !self.main_open {
             return;
@@ -436,6 +554,10 @@ impl App {
                 if self.tray.active() {
                     // Down to the tray; the program and its stickers keep running.
                     self.main_open = false;
+                    if !self.prefs.tray_hint_done {
+                        self.prefs.tray_hint_done = true;
+                        self.tray_notice = Some(ctx.input(|i| i.time) + 12.);
+                    }
                     self.autosave(0., true);
                 } else {
                     root.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);

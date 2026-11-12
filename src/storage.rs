@@ -728,7 +728,7 @@ impl App {
     /// Everything except the memos themselves. New pictures in any memo are
     /// written to the images folder first, so memos can name their files.
     fn meta(&mut self, dir: &Path) -> Saved {
-        for n in &mut self.data.notes {
+        for n in self.data.notes.untracked_mut() {
             for tab in n
                 .document
                 .tabs
@@ -815,7 +815,8 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, r)| note_from(r, i))
-            .collect();
+            .collect::<Vec<_>>()
+            .into();
         self.data.projects = s.projects.clone();
         let count = self.data.notes.len();
         self.data.links = s
@@ -913,43 +914,93 @@ impl App {
             self.switch_data_dir(&dir);
         }
         let meta = self.meta(&dir);
-        let notes: Vec<NoteRec> = self.data.notes.iter().map(note_rec).collect();
-        let changed: Vec<(usize, &NoteRec)> = notes
-            .iter()
-            .enumerate()
-            .filter(|(i, r)| self.saving.notes.get(*i) != Some(*r))
-            .collect();
-        let meta_changed = self.saving.meta.as_ref() != Some(&meta);
-        let shrank = self.saving.notes.len() > notes.len();
+        // Only memos handed out for changing since the last save are looked
+        // at (all of them on exit, after a failed write or a new folder), and
+        // only a fingerprint of each memo is kept, not a second copy.
+        let count = self.data.notes.len();
+        let touched = self.data.notes.take_touched();
+        let look: Vec<usize> = match touched {
+            Some(t) if !force && !std::mem::take(&mut self.saving.full) => t,
+            _ => {
+                self.saving.full = false;
+                (0..count).collect()
+            }
+        };
+        let mut hashes = self.saving.notes.clone();
+        hashes.resize(count, 0);
+        let mut changed = vec![];
+        for i in look.into_iter().filter(|&i| i < count) {
+            let rec = note_rec(&self.data.notes[i]);
+            let h = fingerprint(&rec);
+            if self.saving.notes.get(i) != Some(&h) {
+                changed.push((i, rec));
+            }
+            hashes[i] = h;
+        }
+        let meta_hash = fingerprint(&meta);
+        let meta_changed = self.saving.meta != Some(meta_hash);
+        let shrank = self.saving.notes.len() > hashes.len();
         if changed.is_empty() && !meta_changed && !shrank {
             return;
         }
+        let changed: Vec<(usize, &NoteRec)> = changed.iter().map(|(i, r)| (*i, r)).collect();
         let result = self
             .saving
             .db
             .as_mut()
             .ok_or_else(|| self.saving.error.clone())
-            .and_then(|db| write(db, &changed, notes.len(), meta_changed.then_some(&meta)));
+            .and_then(|db| write(db, &changed, hashes.len(), meta_changed.then_some(&meta)));
         match result {
             Ok(()) => {
-                self.saving.notes = notes;
-                self.saving.meta = Some(meta);
+                self.saving.notes = hashes;
+                self.saving.meta = Some(meta_hash);
                 self.saving.error.clear();
             }
-            Err(e) => self.saving.error = format!("저장하지 못했습니다: {e}"),
+            Err(e) => {
+                self.saving.full = true;
+                let e = format!("저장하지 못했습니다: {e}");
+                // Tell the user once, wherever they are; settings keeps showing it.
+                if self.saving.error != e {
+                    self.toast = e.clone();
+                }
+                self.saving.error = e;
+            }
         }
+    }
+    /// What was just read from the database is what is saved: the first
+    /// autosave then writes only what differs.
+    fn mark_saved(&mut self, dir: &Path) {
+        self.switch_data_dir(dir);
+        let meta = self.meta(dir);
+        self.saving.notes = self
+            .data
+            .notes
+            .iter()
+            .map(|n| fingerprint(&note_rec(n)))
+            .collect();
+        self.saving.meta = Some(fingerprint(&meta));
+        self.saving.full = false;
+        self.data.notes.take_touched();
     }
     /// Start saving into `dir`. Pictures of the previous data folder are
     /// copied in the background and stay readable meanwhile; everything is
     /// written in full to the new folder.
     fn switch_data_dir(&mut self, dir: &Path) {
         if let Some(old) = self.saving.dir.take() {
+            // Data already in the new folder is kept as a backup there
+            // before this workspace is written over it.
+            if dir.join(DB).exists() {
+                if let Err(e) = backup(dir) {
+                    self.toast = format!("새 폴더의 기존 데이터를 백업하지 못했습니다: {e}");
+                }
+            }
             let (from, to) = (old.join("images"), dir.join("images"));
             std::thread::spawn(move || copy_missing(&from, &to));
         }
         use_image_dir(dir);
         self.saving.notes.clear();
         self.saving.meta = None;
+        self.saving.full = true;
         self.saving.db = match open(dir) {
             Ok(c) => Some(c),
             Err(e) => {
@@ -1028,7 +1079,10 @@ impl App {
         let dir = data_dir(&self.prefs.data_path);
         use_image_dir(&dir);
         match read(&dir) {
-            Ok(Some(saved)) => self.restore(&saved),
+            Ok(Some(saved)) => {
+                self.restore(&saved);
+                self.mark_saved(&dir);
+            }
             Ok(None) => self.start_fresh(),
             Err(e) => {
                 // Keep the unreadable file; never overwrite it.
@@ -1049,7 +1103,6 @@ impl App {
                 );
             }
         }
-        self.purge_expired_trash(Local::now().naive_local());
         if self.prefs.first_run_done {
             self.page = self.prefs.start_page;
         } else {
@@ -1061,7 +1114,7 @@ impl App {
     /// An empty workspace holding only the usage guide.
     pub fn start_fresh(&mut self) {
         self.data = Workspace {
-            notes: vec![],
+            notes: vec![].into(),
             projects: vec!["개인 업무".into()],
             links: vec![],
         };
@@ -1083,6 +1136,8 @@ fn open(dir: &Path) -> Result<rusqlite::Connection, String> {
     db.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
+         PRAGMA journal_size_limit=4194304;
+         PRAGMA wal_checkpoint(TRUNCATE);
          CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, rec TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
     )
@@ -1150,7 +1205,15 @@ pub fn read(dir: &Path) -> Result<Option<Saved>, String> {
         if !json.exists() || modified(FILE) <= db_time {
             return read_db(&dir.join(DB)).map(Some);
         }
+        // An unreadable newer file must not cost the good database.
+        let Ok(saved) = read_file(&json) else {
+            let _ = std::fs::rename(&json, dir.join("data.unreadable.json"));
+            return read_db(&dir.join(DB)).map(Some);
+        };
         backup(dir)?;
+        write_all(dir, &saved)?;
+        let _ = std::fs::rename(&json, dir.join("data.before-db.json"));
+        return Ok(Some(saved));
     }
     if !json.exists() {
         return Ok(None);
@@ -1222,12 +1285,31 @@ pub fn backup(dir: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// A fingerprint of a record as it would be written.
+fn fingerprint(rec: &impl Serialize) -> u64 {
+    struct Sink(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut sink = Sink(Default::default());
+    let _ = serde_json::to_writer(&mut sink, rec);
+    sink.0.finish()
+}
+
 /// Autosave bookkeeping kept in `App`.
 #[derive(Default)]
 pub struct Saving {
-    /// Memos and the rest as last written.
-    notes: Vec<NoteRec>,
-    meta: Option<Saved>,
+    /// Fingerprints of the memos and of the rest as last written.
+    notes: Vec<u64>,
+    meta: Option<u64>,
+    /// Look at every memo at the next save, not only the touched ones.
+    full: bool,
     pub checked: f64,
     /// Input happened since the last check.
     pending: bool,
@@ -1241,6 +1323,7 @@ impl Saving {
     pub fn rewrite(&mut self) {
         self.notes.clear();
         self.meta = None;
+        self.full = true;
         self.checked = f64::MIN;
         self.pending = true;
     }
@@ -1339,6 +1422,27 @@ mod tests {
         assert_eq!(w.mode, crate::studio::Mode::Sticker);
         assert_eq!(b.studio.windows.len(), 1);
         drop(a);
+        // Starting from the database: nothing is pending, and afterwards
+        // only memos handed out for changing are looked at.
+        let mut c = App::sample(day);
+        c.prefs.data_path = dir.display().to_string();
+        c.prefs.first_run_done = true;
+        c.load_or_start();
+        assert_eq!(c.saving.notes.len(), c.data.notes.len());
+        assert_eq!(c.data.notes.take_touched(), Some(vec![]));
+        let before = c.saving.notes.clone();
+        c.data.notes[3].title = "세 번째만 바뀜".into();
+        INPUT.store(true, Ordering::Relaxed);
+        c.autosave(100., false);
+        let changed: Vec<usize> = (0..before.len())
+            .filter(|&i| before[i] != c.saving.notes[i])
+            .collect();
+        assert_eq!(changed, vec![3]);
+        assert_eq!(
+            read(&dir).unwrap().unwrap().notes[3].title,
+            "세 번째만 바뀜"
+        );
+        drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1365,6 +1469,11 @@ mod tests {
         assert!(read(&dir).unwrap().unwrap() == newer);
         assert!(read(&dir).unwrap().unwrap() == newer);
         assert!(!dir.join(FILE).exists());
+        // A newer file that cannot be read never replaces the database.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(dir.join(FILE), "{ broken").unwrap();
+        assert!(read(&dir).unwrap().unwrap() == newer);
+        assert!(dir.join("data.unreadable.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

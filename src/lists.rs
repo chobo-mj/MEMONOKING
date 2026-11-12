@@ -74,6 +74,53 @@ pub fn lazy_row(
     ui.ctx().data_mut(|d| d.insert_temp(id, drawn));
 }
 
+/// When each cached picture texture was last drawn (egui time).
+static TEXTURES: std::sync::Mutex<Option<HashMap<egui::Id, f64>>> = std::sync::Mutex::new(None);
+
+/// Seconds a picture texture is kept after it was last on screen.
+pub const TEXTURE_KEEP: f64 = 60.;
+
+/// A picture texture made by `make` on first use and kept while it is being
+/// drawn; `release_textures` frees it once it has been off screen a while.
+pub fn texture(
+    ctx: &egui::Context,
+    id: egui::Id,
+    make: impl FnOnce() -> Option<egui::ColorImage>,
+) -> Option<egui::TextureHandle> {
+    let now = ctx.input(|i| i.time);
+    let cached = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id));
+    let texture = match cached {
+        Some(t) => t,
+        None => {
+            let t = ctx.load_texture(
+                id.short_debug_format(),
+                make()?,
+                egui::TextureOptions::LINEAR,
+            );
+            ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+            t
+        }
+    };
+    let mut used = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    used.get_or_insert_with(Default::default).insert(id, now);
+    Some(texture)
+}
+
+/// Free cached textures not drawn for `TEXTURE_KEEP` seconds.
+pub fn release_textures(ctx: &egui::Context) {
+    let now = ctx.input(|i| i.time);
+    let mut used = TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(used) = used.as_mut() {
+        used.retain(|id, at| {
+            let keep = now - *at < TEXTURE_KEEP;
+            if !keep {
+                ctx.data_mut(|d| d.remove::<egui::TextureHandle>(*id));
+            }
+            keep
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +160,36 @@ mod tests {
             });
         });
         assert!(drawn > 0 && drawn < 50, "{drawn} rows drawn");
+    }
+
+    #[test]
+    fn textures_are_released_after_being_off_screen() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("texture-test");
+        let image = || Some(egui::ColorImage::new([2, 2], egui::Color32::RED));
+        let at = |time: f64| egui::RawInput {
+            time: Some(time),
+            ..Default::default()
+        };
+        let made = std::cell::Cell::new(0);
+        let draw = |time: f64| {
+            let _ = ctx.run(at(time), |ctx| {
+                texture(ctx, id, || {
+                    made.set(made.get() + 1);
+                    image()
+                });
+            });
+        };
+        draw(0.);
+        draw(1.);
+        let _ = ctx.run(at(30.), release_textures);
+        draw(31.);
+        assert_eq!(made.get(), 1);
+        let _ = ctx.run(at(31. + TEXTURE_KEEP + 1.), release_textures);
+        assert!(ctx
+            .data(|d| d.get_temp::<egui::TextureHandle>(id))
+            .is_none());
+        draw(200.);
+        assert_eq!(made.get(), 2);
     }
 }

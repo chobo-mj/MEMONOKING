@@ -98,6 +98,8 @@ pub struct Picture {
     /// while it is shown, copied or exported.
     pub file: String,
     texture: Option<egui::TextureHandle>,
+    /// When the texture was last drawn (egui time).
+    texture_used: f64,
 }
 impl Picture {
     /// A picture from RGBA pixels (used when loading saved memos).
@@ -119,6 +121,7 @@ impl Picture {
             fit,
             file: String::new(),
             texture: None,
+            texture_used: 0.,
         }
     }
     /// A saved picture whose pixels stay in its file until shown.
@@ -143,6 +146,13 @@ impl Picture {
             crate::storage::load_picture(&self.file, [self.width, self.height])
                 .map(std::borrow::Cow::Owned)
                 .unwrap_or(std::borrow::Cow::Borrowed(&[]))
+        }
+    }
+    /// Free the texture of a saved picture not drawn since `before`; it is
+    /// read from its file again when next shown.
+    pub fn release_texture(&mut self, before: f64) {
+        if self.texture_used < before && !self.file.is_empty() {
+            self.texture = None;
         }
     }
     fn color_image(&self) -> Option<egui::ColorImage> {
@@ -937,18 +947,7 @@ pub fn view(ui: &mut egui::Ui, legacy: &str, doc: &Document, id: impl Hash) {
                 let texture_id =
                     id.with(("view_picture", active, bi, picture.width, picture.height));
                 let texture = picture.texture.clone().or_else(|| {
-                    ui.ctx()
-                        .data(|d| d.get_temp::<egui::TextureHandle>(texture_id))
-                        .or_else(|| {
-                            let texture = ui.ctx().load_texture(
-                                texture_id.short_debug_format(),
-                                picture.color_image()?,
-                                egui::TextureOptions::LINEAR,
-                            );
-                            ui.ctx()
-                                .data_mut(|d| d.insert_temp(texture_id, texture.clone()));
-                            Some(texture)
-                        })
+                    crate::lists::texture(ui.ctx(), texture_id, || picture.color_image())
                 });
                 if let Some(texture) = texture {
                     ui.painter().image(
@@ -1737,6 +1736,7 @@ fn paint_pictures(
             }
         }
         if let Some(t) = &p.texture {
+            p.texture_used = ui.input(|i| i.time);
             painter.image(
                 t.id(),
                 rect,
@@ -1982,6 +1982,7 @@ fn picture_from_file(path: &Path, scale: f32, fit: bool) -> Result<Picture, Stri
         fit,
         file: String::new(),
         texture: None,
+        texture_used: 0.,
         id: 0,
     })
 }
@@ -2002,6 +2003,7 @@ fn picture_from_clipboard(scale: f32, fit: bool) -> Result<Picture, String> {
         fit,
         file: String::new(),
         texture: None,
+        texture_used: 0.,
         id: 0,
     })
 }
@@ -2786,6 +2788,7 @@ mod inline_picture_tests {
             fit: false,
             file: String::new(),
             texture: None,
+            texture_used: 0.,
         }
     }
     #[test]

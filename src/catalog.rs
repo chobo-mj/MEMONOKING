@@ -1,6 +1,7 @@
 //! Folder organization, detailed note lists and the in-memory recycle bin.
 use crate::*;
 use egui::{Sense, Stroke};
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
@@ -1075,6 +1076,23 @@ impl App {
         }
     }
 
+    /// Visible memos by folder (`None`: not filed), reused until input.
+    fn catalog_folder_index(&mut self) -> std::rc::Rc<HashMap<Option<usize>, Vec<usize>>> {
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key(self.data.notes.len());
+        let index = cache.get("catalog_folder_index", key, || {
+            let mut index: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+            for i in (0..self.data.notes.len()).filter(|&i| self.visible(i)) {
+                index
+                    .entry(self.catalog.assignments.get(&i).copied())
+                    .or_default()
+                    .push(i);
+            }
+            index
+        });
+        self.lists = cache;
+        index
+    }
     fn catalog_folders(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui
@@ -1162,16 +1180,11 @@ impl App {
                             });
                     });
                     cols[0].add_space(14.);
-                    let unfiled: Vec<_> = self
-                        .data
-                        .notes
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| {
-                            self.visible(*i) && !self.catalog.assignments.contains_key(i)
-                        })
-                        .map(|(i, _)| i)
-                        .collect();
+                    let unfiled = self
+                        .catalog_folder_index()
+                        .get(&None)
+                        .cloned()
+                        .unwrap_or_default();
                     cols[0].horizontal(|ui| {
                         ui::section_header(
                             ui,
@@ -1203,7 +1216,13 @@ impl App {
                                     );
                                 }
                                 for i in unfiled {
-                                    self.catalog_folder_note(ui, i);
+                                    crate::lists::lazy_row(
+                                        ui,
+                                        ("folder_note", i),
+                                        34.,
+                                        false,
+                                        |ui| self.catalog_folder_note(ui, i),
+                                    );
                                 }
                                 let r = ui.add_sized(
                                     [ui.available_width(), 26.],
@@ -1287,13 +1306,9 @@ impl App {
                 if selected { ACCENT } else { tone.muted },
             );
             let count = self
-                .catalog
-                .assignments
-                .iter()
-                .filter(|(i, folder)| {
-                    **folder == f && **i < self.data.notes.len() && self.visible(**i)
-                })
-                .count();
+                .catalog_folder_index()
+                .get(&Some(f))
+                .map_or(0, Vec::len);
             ui.painter().text(
                 egui::pos2(rect.left() + 48., rect.center().y),
                 egui::Align2::LEFT_CENTER,
@@ -1354,17 +1369,15 @@ impl App {
         }
         if self.catalog.folders[f].open {
             ui.indent(("catalog_folder", f), |ui| {
-                let notes: Vec<_> = self
-                    .catalog
-                    .assignments
-                    .iter()
-                    .filter(|(i, folder)| {
-                        **folder == f && **i < self.data.notes.len() && self.visible(**i)
-                    })
-                    .map(|(&i, _)| i)
-                    .collect();
+                let notes = self
+                    .catalog_folder_index()
+                    .get(&Some(f))
+                    .cloned()
+                    .unwrap_or_default();
                 for i in notes {
-                    self.catalog_folder_note(ui, i);
+                    crate::lists::lazy_row(ui, ("folder_note", i), 34., false, |ui| {
+                        self.catalog_folder_note(ui, i)
+                    });
                 }
                 let children: Vec<_> = self
                     .catalog
@@ -1515,7 +1528,7 @@ impl App {
     pub fn trash_ui(&mut self, ui: &mut egui::Ui) {
         ui::hint(
             ui,
-            "삭제한 메모와 본문 탭을 복원하거나 영구 삭제합니다 · 현재 실행 중에만 보관됩니다",
+            "삭제한 메모와 본문 탭을 복원하거나 영구 삭제합니다 · 삭제한 메모는 설정의 보관 기간이 지나면 자동으로 지워집니다",
         );
         ui.add_space(10.);
         let notes: Vec<_> = self
@@ -2677,7 +2690,7 @@ mod tests {
     #[test]
     fn replacement_scopes_cover_other_tabs_and_keep_excluded_notes_unchanged() {
         let mut a = App::sample(Local::now().date_naive());
-        for n in &mut a.data.notes {
+        for n in a.data.notes.iter_mut() {
             n.body = "첫 본문".into();
             n.document.add_tab();
             n.document.tabs[1].body = "대상 한글🙂 대상".into();

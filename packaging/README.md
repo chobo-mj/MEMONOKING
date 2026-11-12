@@ -33,7 +33,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath '.\OmniMemoJang-0.3.0-ui-preview.1-W
 2. 형식 검사·Clippy·테스트를 통과한 뒤 `x86_64-pc-windows-msvc`로 빌드합니다. `RUSTFLAGS=-C target-feature=+crt-static`으로 C 런타임을 정적 연결하고 `dumpbin /DEPENDENTS`로 별도 Visual C++ 런타임 DLL이 없는지 확인합니다.
 3. `dist/portable/OmniMemoJang`에 `OmniMemoJang.exe`, 이 문서의 사용 안내 부분을 담은 `README.txt`, 내부 `SHA256SUMS.txt`만 명시적으로 배치합니다. 소스 트리 전체나 로컬 작업 폴더를 복사하지 않습니다.
 4. Windows 환경에 있는 Inno Setup의 `ISCC.exe`를 먼저 사용합니다. 실행파일의 버전 리소스에 의존하지 않고 출력 파일을 만들지 않는 짧은 컴파일로 실제 엔진 버전을 확인합니다. 없으면 GitHub 빌드 환경에만 Chocolatey로 Inno Setup을 설치합니다. 한국어 UTF-8 스크립트와 `x64compatible` 지시문을 지원하는 Inno Setup 6.3 이상이 필요합니다.
-5. 현재 사용자 영역에 무인 설치하고 실행파일 해시·시작 메뉴 바로가기·선택하지 않은 바탕화면 바로가기 부재를 확인한 뒤 제거합니다. 앱 자체를 자동 실행하거나 Windows 시작/네트워크/보안 설정을 변경하지 않습니다.
+5. 현재 사용자 영역에 무인 설치하고 실행파일 해시·시작 메뉴 바로가기·선택하지 않은 바탕화면 바로가기 부재를 확인한 뒤 제거합니다. 앱 자체를 자동 실행하거나 Windows 시작/네트워크/보안 설정을 변경하지 않습니다. 제거할 때는 트레이에서 실행 중인 프로그램을 끝내고, 사용자가 설정에서 켠 ‘Windows 시작 시 자동 실행’ 등록을 지웁니다.
 6. 결과 체크섬을 만들고 세 파일을 GitHub Actions 산출물로 남깁니다. 이후 기본 `GITHUB_TOKEN`의 `contents: write` 권한으로 해당 태그의 **사전 배포**에 게시합니다. 별도 개인 토큰이 필요하지 않습니다.
 
 결과물은 다음과 같습니다.

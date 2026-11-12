@@ -1177,8 +1177,12 @@ impl App {
                     .iter()
                     .map(|n| Rect::from_min_size(canvas.min + n.pos, size))
                     .collect();
+                let mut shown = vec![false; self.data.notes.len()];
+                for &i in &ids {
+                    shown[i] = true;
+                }
                 for &(a, b) in &self.data.links {
-                    if ids.contains(&a) && ids.contains(&b) {
+                    if shown[a] && shown[b] {
                         edge(
                             ui.painter(),
                             rects[a],
@@ -1190,7 +1194,7 @@ impl App {
                 }
                 for &i in &ids {
                     for &p in &self.data.notes[i].parents {
-                        if ids.contains(&p) {
+                        if shown.get(p).copied().unwrap_or(false) {
                             let a = rects[p].center_bottom();
                             let b = rects[i].center_top();
                             ui.painter().arrow(
@@ -1203,6 +1207,10 @@ impl App {
                 }
                 for i in ids {
                     let rect = rects[i];
+                    // Cards outside the view are not drawn.
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
                     let selected = self.picked.contains(&i);
                     let tone = ui::t(ui);
                     let fill = if self.dark {

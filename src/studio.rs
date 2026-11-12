@@ -929,6 +929,8 @@ impl App {
         n.document.opacity = self.desktop.opacity / 100.;
         n.document.image_scale = [0.25, 0.5, 0.75, 1., 1.][self.desktop.image_scale];
         n.document.image_fit = self.desktop.image_scale == 4;
+        // The caret starts in the body, so a quick memo can be typed at once.
+        n.document.requested_selection = Some(0..0);
         self.data.notes.push(n);
         self.studio.windows.insert(i, Window::new(Mode::Sticker));
         i
@@ -1047,7 +1049,10 @@ impl App {
                 if changed || w.center {
                     if let Some(area) = crate::native_window::work_area(ctx) {
                         let position = if w.center {
-                            area.center() - size * 0.5
+                            // New windows step down-right so they do not
+                            // cover the ones already open.
+                            let open = self.studio.windows.values().filter(|o| o.open).count();
+                            area.center() - size * 0.5 + Vec2::splat(28. * (open % 8) as f32)
                         } else {
                             ctx.input(|v| v.viewport().outer_rect.map(|r| r.min))
                                 .unwrap_or(area.min)
@@ -1062,7 +1067,16 @@ impl App {
                     }
                     w.center = false;
                 }
-                if let Some(p) = w.place.take() {
+                if let Some(mut p) = w.place.take() {
+                    // A window saved on a monitor that is gone comes back on
+                    // the current one.
+                    let monitors = crate::native_window::monitors(ctx);
+                    let grip = p + Vec2::new(40., 12.);
+                    if !monitors.is_empty() && !monitors.iter().any(|m| m.contains(grip)) {
+                        if let Some(area) = crate::native_window::work_area(ctx) {
+                            p = crate::native_window::fit_position(p, size, area);
+                        }
+                    }
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(p));
                 }
                 if w.focus {

@@ -35,7 +35,7 @@ UninstallDisplayIcon={app}\OmniMemoJang.exe
 UninstallDisplayName=OmniMemoJang UI Preview
 VersionInfoVersion={#AppVersion}
 InfoBeforeFile={#StageDir}\README.txt
-CloseApplications=yes
+CloseApplications=force
 RestartApplications=no
 SetupMutex=OmniMemoJangPreviewInstaller
 
@@ -55,5 +55,16 @@ Source: "{#StageDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{userprograms}\OmniMemoJang\OmniMemoJang"; Filename: "{app}\OmniMemoJang.exe"; WorkingDir: "{app}"
 Name: "{userdesktop}\OmniMemoJang"; Filename: "{app}\OmniMemoJang.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
-; No [Run], [Registry], download, startup, firewall, or security-policy actions.
+; Nothing is written to the registry at install time. The program itself adds
+; the "start with Windows" value when the user turns that setting on, so
+; uninstalling removes it (ValueType none + uninsdeletevalue creates nothing).
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "OmniMemoJang"; Flags: dontcreatekey uninsdeletevalue
+
+; The program keeps running in the tray: stop it before its files are removed.
+; Memos are saved within two seconds of every change, so nothing is lost.
+[UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/im OmniMemoJang.exe /f"; Flags: runhidden; RunOnceId: "StopOmniMemoJang"
+
+; No [Run], download, firewall, or security-policy actions.
 ; Inno Setup manages the current user's uninstall registration automatically.

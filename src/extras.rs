@@ -547,28 +547,11 @@ impl App {
     }
     pub fn relation_tree(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |cols| {
-            let mut roots: Vec<_> = self
-                .data
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| self.visible(*i) && n.parents.iter().all(|&p| !self.visible(p)))
-                .map(|(i, _)| i)
-                .collect();
-            roots.sort_by_key(|&i| {
-                let connected =
-                    self.data
-                        .notes
-                        .iter()
-                        .enumerate()
-                        .any(|(j, n)| self.visible(j) && n.parents.contains(&i))
-                        || self.data.links.iter().any(|&(a, b)| {
-                            (a == i && self.visible(b)) || (b == i && self.visible(a))
-                        });
-                (!connected, self.data.notes[i].created)
-            });
-            for i in roots {
-                self.tree_branch(&mut cols[0], i, &mut vec![]);
+            let tree = self.relation_index();
+            for &i in &tree.roots {
+                crate::lists::lazy_row(&mut cols[0], ("tree_root", i), 22., false, |ui| {
+                    self.tree_branch(ui, i, &mut vec![], &tree)
+                });
             }
             if let Some(i) = self.extra.tree_selected.filter(|&i| self.visible(i)) {
                 cols[1].heading(&self.data.notes[i].title);
@@ -585,19 +568,54 @@ impl App {
             }
         });
     }
-    fn tree_branch(&mut self, ui: &mut egui::Ui, i: usize, path: &mut Vec<usize>) {
+    /// Roots (connected memos first, then by creation) and children of the
+    /// relation tree, reused until input.
+    fn relation_index(&mut self) -> std::rc::Rc<RelationIndex> {
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key(self.data.notes.len());
+        let index = cache.get("relation_tree", key, || {
+            let mut index = RelationIndex::default();
+            let mut connected = HashSet::new();
+            for (j, n) in self.data.notes.iter().enumerate() {
+                if !self.visible(j) {
+                    continue;
+                }
+                for &p in &n.parents {
+                    index.children.entry(p).or_default().push(j);
+                    connected.insert(p);
+                }
+                if n.parents.iter().all(|&p| !self.visible(p)) {
+                    index.roots.push(j);
+                }
+            }
+            for &(a, b) in &self.data.links {
+                if self.visible(b) {
+                    connected.insert(a);
+                }
+                if self.visible(a) {
+                    connected.insert(b);
+                }
+            }
+            index
+                .roots
+                .sort_by_key(|&i| (!connected.contains(&i), self.data.notes[i].created));
+            index
+        });
+        self.lists = cache;
+        index
+    }
+    fn tree_branch(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        path: &mut Vec<usize>,
+        tree: &RelationIndex,
+    ) {
         if path.contains(&i) {
             return;
         }
         path.push(i);
-        let children: Vec<_> = self
-            .data
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(j, n)| self.visible(*j) && n.parents.contains(&i))
-            .map(|(j, _)| j)
-            .collect();
+        let children = tree.children.get(&i).cloned().unwrap_or_default();
         if children.is_empty() {
             if ui
                 .selectable_label(
@@ -620,7 +638,7 @@ impl App {
                         self.extra.tree_selected = Some(i);
                     }
                     for c in children {
-                        self.tree_branch(ui, c, path);
+                        self.tree_branch(ui, c, path, tree);
                     }
                 });
         }
@@ -821,7 +839,7 @@ impl App {
     pub fn delete_project(&mut self, p: usize, delete_notes: bool) {
         self.extra.deleted_projects.insert(p);
         self.extra.hidden_projects.remove(&p);
-        for n in &mut self.data.notes {
+        for n in self.data.notes.iter_mut() {
             if n.project == Some(p) {
                 n.project = None;
                 if delete_notes {
@@ -1065,4 +1083,11 @@ mod picker_binding_tests {
         );
         assert_eq!(app.data.notes[0].occurrence_completed.get(&next), Some(&t1));
     }
+}
+
+/// Root memos and each memo's children in the relation tree.
+#[derive(Default)]
+pub struct RelationIndex {
+    roots: Vec<usize>,
+    children: std::collections::HashMap<usize, Vec<usize>>,
 }

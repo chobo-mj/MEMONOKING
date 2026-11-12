@@ -299,7 +299,7 @@ impl App {
     }
     fn set_folder_tab(&mut self, folder: usize, tab: usize) {
         self.extra.folders[folder].tab = tab;
-        for n in &mut self.data.notes {
+        for n in self.data.notes.iter_mut() {
             if n.folder == Some(folder) {
                 n.wiki_tab = Some(tab);
             }
@@ -528,18 +528,16 @@ impl App {
                 for f in roots {
                     self.folder_tree(ui, f, &mut new_note, &mut new_folder);
                 }
-                let notes: Vec<_> = self
-                    .data
-                    .notes
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, n)| {
-                        self.visible(*i) && n.wiki && n.folder.is_none() && n.wiki_tab == Some(tab)
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
+                let notes = self
+                    .wiki_index()
+                    .tabs
+                    .get(&tab)
+                    .cloned()
+                    .unwrap_or_default();
                 for i in notes {
-                    self.wiki_note_row(ui, i, 30.);
+                    crate::lists::lazy_row(ui, ("wiki_row", i), 30., false, |ui| {
+                        self.wiki_note_row(ui, i, 30.)
+                    });
                 }
             });
         if let Some(folder) = new_folder {
@@ -553,22 +551,36 @@ impl App {
             self.wiki_open(i);
         }
     }
+    /// Visible wiki memos by where they are filed, reused until input.
+    fn wiki_index(&mut self) -> std::rc::Rc<WikiIndex> {
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key(self.data.notes.len());
+        let index = cache.get("wiki_index", key, || {
+            let mut index = WikiIndex::default();
+            for (i, n) in self.data.notes.iter().enumerate() {
+                if !n.wiki || !self.visible(i) {
+                    continue;
+                }
+                match (n.folder, n.wiki_tab) {
+                    (Some(f), _) => index.folders.entry(f).or_default().push(i),
+                    (None, Some(t)) => index.tabs.entry(t).or_default().push(i),
+                    (None, None) => index.unfiled.push(i),
+                }
+            }
+            index
+                .unfiled
+                .sort_by_key(|&i| std::cmp::Reverse(self.data.notes[i].created));
+            index
+        });
+        self.lists = cache;
+        index
+    }
     /// ② Wiki memos not filed in any tab, newest first.
     fn wiki_unfiled(&mut self, ui: &mut egui::Ui) {
         let tone = crate::ui::t(ui);
         let area = ui.max_rect();
         self.wiki_drop(ui, area, None);
-        let mut ids: Vec<_> = self
-            .data
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| {
-                self.visible(*i) && n.wiki && n.folder.is_none() && n.wiki_tab.is_none()
-            })
-            .map(|(i, _)| i)
-            .collect();
-        ids.sort_by_key(|&i| std::cmp::Reverse(self.data.notes[i].created));
+        let ids = self.wiki_index().unfiled.clone();
         ui.add_space(8.);
         ui.horizontal(|ui| {
             ui.add_space(8.);
@@ -589,7 +601,9 @@ impl App {
                     crate::ui::hint(ui, "  메모의 ‘위키’ 표시를 켜면 여기에 모입니다");
                 }
                 for i in ids {
-                    self.wiki_note_row(ui, i, 28.);
+                    crate::lists::lazy_row(ui, ("wiki_row", i), 28., false, |ui| {
+                        self.wiki_note_row(ui, i, 28.)
+                    });
                 }
             });
     }
@@ -809,14 +823,12 @@ impl App {
         new_folder: &mut Option<Option<usize>>,
     ) {
         let open = self.extra.folder_open.contains(&f);
-        let ids: Vec<_> = self
-            .data
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| self.visible(*i) && n.wiki && n.folder == Some(f))
-            .map(|(i, _)| i)
-            .collect();
+        let ids = self
+            .wiki_index()
+            .folders
+            .get(&f)
+            .cloned()
+            .unwrap_or_default();
         if self.extra.wiki_rename == Some(crate::extras::WikiRename::Folder(f)) {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.extra.folders[f].title)
@@ -873,7 +885,9 @@ impl App {
                 // The folder's memo area also files dropped memos into it.
                 let top = ui.cursor().top();
                 for i in ids {
-                    self.wiki_note_row(ui, i, 28.);
+                    crate::lists::lazy_row(ui, ("wiki_row", i), 28., false, |ui| {
+                        self.wiki_note_row(ui, i, 28.)
+                    });
                 }
                 let children: Vec<_> = (0..self.extra.folders.len())
                     .filter(|&c| self.extra.folders[c].parent == Some(f))
@@ -934,31 +948,38 @@ impl App {
             ui.colored_label(ACCENT, "날짜를 선택하세요");
             return;
         };
-        let mut rows = vec![];
-        let matches = |t: NaiveDateTime| {
-            if self.journal_month {
-                t.year() == date.year() && t.month() == date.month()
-            } else {
-                t.date() == date
-            }
-        };
-        for (i, n) in self.data.notes.iter().enumerate() {
-            if !self.visible(i) {
-                continue;
-            }
-            if n.duration > 1 {
-                for (&d, &t) in &n.occurrence_completed {
-                    if matches(t) {
-                        rows.push((i, Some(d), t));
+        let mut cache = std::mem::take(&mut self.lists);
+        let key = crate::lists::key((date, self.journal_month, self.data.notes.len()));
+        let rows = cache.get("journal", key, || {
+            let mut rows = vec![];
+            let matches = |t: NaiveDateTime| {
+                if self.journal_month {
+                    t.year() == date.year() && t.month() == date.month()
+                } else {
+                    t.date() == date
+                }
+            };
+            for (i, n) in self.data.notes.iter().enumerate() {
+                if !self.visible(i) {
+                    continue;
+                }
+                if n.duration > 1 {
+                    for (&d, &t) in &n.occurrence_completed {
+                        if matches(t) {
+                            rows.push((i, Some(d), t));
+                        }
+                    }
+                } else if n.done {
+                    if let Some(t) = n.completed.filter(|&t| matches(t)) {
+                        rows.push((i, None, t));
                     }
                 }
-            } else if n.done {
-                if let Some(t) = n.completed.filter(|&t| matches(t)) {
-                    rows.push((i, None, t));
-                }
             }
-        }
-        rows.sort_by_key(|r| r.2);
+            rows.sort_by_key(|r| r.2);
+            rows
+        });
+        self.lists = cache;
+        let rows = (*rows).clone();
         crate::ui::section_header(ui, crate::icons::Icon::Today, "완료한 일", Some(rows.len()));
         if rows.is_empty() {
             crate::ui::card(ui, |ui| {
@@ -972,7 +993,7 @@ impl App {
             });
         }
         for (i, d, t) in rows {
-            ui.push_id(("journal", i, d), |ui| {
+            crate::lists::lazy_row(ui, ("journal", i, d), 96., false, |ui| {
                 crate::ui::card(ui, |ui| {
                     ui.set_width(ui.available_width());
                     let tone = crate::ui::t(ui);
@@ -1224,4 +1245,12 @@ mod completion_editor_tests {
             Some(&corrected)
         );
     }
+}
+
+/// Wiki memos grouped by folder, by tab root, and unfiled (newest first).
+#[derive(Default)]
+struct WikiIndex {
+    folders: std::collections::HashMap<usize, Vec<usize>>,
+    tabs: std::collections::HashMap<usize, Vec<usize>>,
+    unfiled: Vec<usize>,
 }

@@ -122,7 +122,8 @@ pub fn single_instance() -> bool {
             let first = GetLastError() != ERROR_ALREADY_EXISTS;
             let show = CreateEventW(std::ptr::null(), 0, 0, event.as_ptr());
             if !first {
-                if !show.is_null() {
+                // Started by Windows (`--tray`) while already running: stay quiet.
+                if !show.is_null() && !std::env::args().any(|x| x == "--tray") {
                     SetEvent(show);
                 }
                 return false;

@@ -184,8 +184,75 @@ impl Note {
         self.completed = self.occurrence_completed.values().max().copied();
     }
 }
+/// The memos, remembering which ones were handed out for changing so that
+/// saving only has to look at those.
+#[derive(Default)]
+pub struct Notes {
+    items: Vec<Note>,
+    touched: std::collections::BTreeSet<usize>,
+    /// Any memo may have changed (the whole list was borrowed for writing).
+    all: bool,
+}
+impl Notes {
+    pub fn push(&mut self, n: Note) {
+        self.touched.insert(self.items.len());
+        self.items.push(n);
+    }
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut Note> {
+        self.touched.insert(i);
+        self.items.get_mut(i)
+    }
+    /// The memos for a change that is not part of what is saved (such as
+    /// releasing a picture's texture).
+    pub fn untracked_mut(&mut self) -> &mut [Note] {
+        &mut self.items
+    }
+    /// The memos handed out for changing since the last call; `None` when
+    /// any of them may have changed.
+    pub fn take_touched(&mut self) -> Option<Vec<usize>> {
+        let touched = std::mem::take(&mut self.touched);
+        if std::mem::take(&mut self.all) {
+            None
+        } else {
+            Some(touched.into_iter().collect())
+        }
+    }
+}
+impl From<Vec<Note>> for Notes {
+    fn from(items: Vec<Note>) -> Self {
+        Self {
+            items,
+            touched: Default::default(),
+            all: true,
+        }
+    }
+}
+impl std::ops::Deref for Notes {
+    type Target = [Note];
+    fn deref(&self) -> &[Note] {
+        &self.items
+    }
+}
+impl std::ops::DerefMut for Notes {
+    fn deref_mut(&mut self) -> &mut [Note] {
+        self.all = true;
+        &mut self.items
+    }
+}
+impl std::ops::Index<usize> for Notes {
+    type Output = Note;
+    fn index(&self, i: usize) -> &Note {
+        &self.items[i]
+    }
+}
+impl std::ops::IndexMut<usize> for Notes {
+    fn index_mut(&mut self, i: usize) -> &mut Note {
+        self.touched.insert(i);
+        &mut self.items[i]
+    }
+}
 pub struct Workspace {
-    pub notes: Vec<Note>,
+    pub notes: Notes,
     pub projects: Vec<String>,
     pub links: Vec<(usize, usize)>,
 }
@@ -211,7 +278,7 @@ impl Workspace {
         notes[1].project = Some(0);
         notes[5].recurring = true;
         Self {
-            notes,
+            notes: notes.into(),
             projects: vec!["OmniMemoJang".into(), "개인 업무".into()],
             links: vec![(0, 1)],
         }
@@ -495,5 +562,26 @@ mod explicit_span_tests {
         assert_eq!(n.time, NaiveTime::from_hms_opt(8, 0, 0).unwrap());
         assert_eq!(n.end_time, Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()));
         assert_eq!(n.occurrence_completed.get(&early), Some(&completed));
+    }
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+    #[test]
+    fn notes_remember_which_memos_were_handed_out_for_changing() {
+        let mut notes = Notes::from(vec![Note::new("a", None, 0), Note::new("b", None, 1)]);
+        assert_eq!(notes.take_touched(), None);
+        let _ = notes[0].title.len();
+        let _ = notes.iter().count();
+        assert_eq!(notes.take_touched(), Some(vec![]));
+        notes[1].title = "c".into();
+        notes.push(Note::new("d", None, 2));
+        notes.untracked_mut()[0].fold = 1;
+        assert_eq!(notes.take_touched(), Some(vec![1, 2]));
+        for n in notes.iter_mut() {
+            n.done = true;
+        }
+        assert_eq!(notes.take_touched(), None);
     }
 }
