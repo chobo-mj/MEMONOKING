@@ -19,6 +19,32 @@ pub fn project_label(filter: Option<usize>, names: &[String]) -> &str {
         Some(p) => names.get(p).map(String::as_str).unwrap_or("프로젝트 없음"),
     }
 }
+/// The wiki's left tree/unfiled column width. `requested > 0` is a
+/// user-set width (clamped to the valid range); `0.` falls back to the
+/// original proportional default (22% of the wiki area, clamped 210-280).
+fn wiki_left_col_width(requested: f32, inner_width: f32) -> f32 {
+    let (min, max) = wiki_left_col_bounds(inner_width);
+    if requested > 0. {
+        requested.clamp(min, max)
+    } else {
+        (inner_width * 0.22).clamp(210., 280.).min(max)
+    }
+}
+/// Valid width range for the wiki's left column, leaving at least 260px
+/// for the two content panes to its right.
+fn wiki_left_col_bounds(inner_width: f32) -> (f32, f32) {
+    let min = 160.;
+    (min, (inner_width - 260.).max(min))
+}
+/// Split `available` width (minus `gap`) between the wiki's two content
+/// panes by `frac` (pane 0's share), each kept at least 160px wide.
+fn wiki_pane_widths(frac: f32, available: f32, gap: f32) -> (f32, f32) {
+    let pane_min = 160.;
+    let total = available - gap;
+    let pane0 = (total * frac).clamp(pane_min, (total - pane_min).max(pane_min));
+    let pane1 = (total - pane0).max(pane_min);
+    (pane0, pane1)
+}
 /// A large, clickable choice row: icon badge, title and one line of detail.
 fn scope_card(
     ui: &mut egui::Ui,
@@ -356,7 +382,7 @@ impl App {
             egui::StrokeKind::Inside,
         );
         let inner = rect.shrink(8.);
-        let left_w = (inner.width() * 0.22).clamp(210., 280.);
+        let left_w = wiki_left_col_width(self.extra.wiki_left_width, inner.width());
         let left = egui::Rect::from_min_size(inner.min, Vec2::new(left_w, inner.height()));
         let tree_h = (left.height() * 0.58).round();
         let tree_rect = egui::Rect::from_min_size(left.min, Vec2::new(left_w, tree_h));
@@ -369,13 +395,43 @@ impl App {
             ],
             egui::Stroke::new(1.0_f32, tone.line),
         );
+        let left_handle = egui::Rect::from_min_max(
+            egui::pos2(left.right() + 1., rect.top()),
+            egui::pos2(left.right() + 7., rect.bottom()),
+        );
+        let drag = ui
+            .interact(
+                left_handle,
+                ui.id().with("wiki_left_splitter"),
+                egui::Sense::drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+            .on_hover_text("드래그해서 위키 목록 너비 조절 · 더블클릭으로 기본값");
         ui.painter().line_segment(
             [
                 egui::pos2(left.right() + 4., rect.top()),
                 egui::pos2(left.right() + 4., rect.bottom()),
             ],
-            egui::Stroke::new(1.0_f32, tone.line),
+            egui::Stroke::new(
+                if drag.hovered() || drag.dragged() {
+                    2.0_f32
+                } else {
+                    1.0_f32
+                },
+                if drag.hovered() || drag.dragged() {
+                    crate::ui::ACCENT.gamma_multiply(0.6)
+                } else {
+                    tone.line
+                },
+            ),
         );
+        if drag.dragged() {
+            let (min, max) = wiki_left_col_bounds(inner.width());
+            self.extra.wiki_left_width = (left_w + drag.drag_delta().x).clamp(min, max);
+        }
+        if drag.double_clicked() {
+            self.extra.wiki_left_width = 0.;
+        }
         self.in_rect(ui, tree_rect, "wiki_tree_area", |a, ui| a.wiki_tree(ui));
         self.in_rect(ui, unfiled_rect, "wiki_unfiled_area", |a, ui| {
             a.wiki_unfiled(ui)
@@ -383,12 +439,42 @@ impl App {
         let right =
             egui::Rect::from_min_max(egui::pos2(left.right() + 12., inner.top()), inner.max);
         let gap = 10.;
-        let pane_w = (right.width() - gap) / 2.;
-        for k in 0..2 {
-            let pane = egui::Rect::from_min_size(
-                egui::pos2(right.left() + k as f32 * (pane_w + gap), right.top()),
-                Vec2::new(pane_w, right.height()),
+        let (pane0_w, pane1_w) = wiki_pane_widths(self.extra.wiki_pane_frac, right.width(), gap);
+        let pane_rects = [
+            egui::Rect::from_min_size(right.min, Vec2::new(pane0_w, right.height())),
+            egui::Rect::from_min_size(
+                egui::pos2(right.left() + pane0_w + gap, right.top()),
+                Vec2::new(pane1_w, right.height()),
+            ),
+        ];
+        let pane_handle = egui::Rect::from_min_max(
+            egui::pos2(pane_rects[0].right(), right.top()),
+            egui::pos2(pane_rects[1].left(), right.bottom()),
+        );
+        let drag = ui
+            .interact(
+                pane_handle,
+                ui.id().with("wiki_pane_splitter"),
+                egui::Sense::drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+            .on_hover_text("드래그해서 두 위키 영역 너비 조절 · 더블클릭으로 균등 분할");
+        if drag.hovered() || drag.dragged() {
+            ui.painter().line_segment(
+                [pane_handle.center_top(), pane_handle.center_bottom()],
+                egui::Stroke::new(2.0_f32, crate::ui::ACCENT.gamma_multiply(0.6)),
             );
+        }
+        if drag.dragged() {
+            let pane_min = 160.;
+            let new_pane0 = (pane0_w + drag.drag_delta().x)
+                .clamp(pane_min, (right.width() - gap - pane_min).max(pane_min));
+            self.extra.wiki_pane_frac = new_pane0 / (right.width() - gap);
+        }
+        if drag.double_clicked() {
+            self.extra.wiki_pane_frac = 0.5;
+        }
+        for (k, pane) in pane_rects.into_iter().enumerate() {
             self.in_rect(ui, pane, ("wiki_pane", k), |a, ui| a.wiki_pane(ui, k));
         }
         ui.allocate_rect(rect, egui::Sense::hover());
@@ -1067,6 +1153,34 @@ mod tests {
     use super::*;
     fn app() -> App {
         App::sample(NaiveDate::from_ymd_opt(2026, 11, 9).unwrap())
+    }
+    #[test]
+    fn wiki_left_width_falls_back_to_the_proportional_default_at_zero() {
+        // 0. (never customized) keeps the original proportional behavior.
+        assert_eq!(wiki_left_col_width(0., 1000.), 220.); // 1000*0.22
+        assert_eq!(wiki_left_col_width(0., 2000.), 280.); // clamped high
+        assert_eq!(wiki_left_col_width(0., 600.), 210.); // clamped low
+
+        // A customized width is honored, but still clamped to the valid
+        // range so it never crowds out the panes to its right or collapses
+        // to nothing.
+        assert_eq!(wiki_left_col_width(230., 1000.), 230.);
+        assert_eq!(wiki_left_col_width(10., 1000.), 160.);
+        assert_eq!(wiki_left_col_width(5000., 1000.), 740.); // 1000 - 260
+    }
+    #[test]
+    fn wiki_pane_widths_split_by_fraction_and_keep_a_minimum() {
+        let (p0, p1) = wiki_pane_widths(0.5, 500., 10.);
+        assert_eq!((p0, p1), (245., 245.));
+        // A middling skew still fits inside the minimum guard.
+        let (p0, p1) = wiki_pane_widths(0.6, 500., 10.);
+        assert_eq!((p0, p1), (294., 196.));
+        // total = 490; the raw 0.75/0.99 split would leave pane 1 under the
+        // 160px minimum, so both are pulled back to the same clamp.
+        for frac in [0.75, 0.99] {
+            let (p0, p1) = wiki_pane_widths(frac, 500., 10.);
+            assert_eq!((p0, p1), (330., 160.));
+        }
     }
     #[test]
     fn no_project_filter_is_distinct_from_all() {

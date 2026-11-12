@@ -102,6 +102,12 @@ pub struct Extra {
     pub table_search: String,
     pub bookmarks: Vec<(String, String)>,
     pub size_applied: Option<(usize, u8)>,
+    /// Width of the wiki's left tree/unfiled column, in pixels. `0.` keeps
+    /// the proportional default (22% of the wiki area, clamped 210-280).
+    pub wiki_left_width: f32,
+    /// Split between the wiki's two content panes, as a fraction of the
+    /// space to the right of the tree column. `0.5` is an even split.
+    pub wiki_pane_frac: f32,
 }
 impl Default for Extra {
     fn default() -> Self {
@@ -165,6 +171,8 @@ impl Default for Extra {
             table_search: String::new(),
             bookmarks: vec![("프로젝트 참고 자료".into(), "https://example.com".into())],
             size_applied: None,
+            wiki_left_width: 0.,
+            wiki_pane_frac: 0.5,
         }
     }
 }
