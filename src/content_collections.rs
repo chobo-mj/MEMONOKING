@@ -413,7 +413,23 @@ fn table_html(table: &Table) -> String {
             .map(|row| format!(
                 "<tr>{}</tr>",
                 row.iter()
-                    .map(|c| format!("<td>{}</td>", html_escape(&c.text)))
+                    .filter(|c| !c.covered)
+                    .map(|c| {
+                        let colspan = if c.col_span > 1 {
+                            format!(" colspan=\"{}\"", c.col_span)
+                        } else {
+                            String::new()
+                        };
+                        let rowspan = if c.row_span > 1 {
+                            format!(" rowspan=\"{}\"", c.row_span)
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            "<td{colspan}{rowspan}>{}</td>",
+                            html_escape(&c.text).replace('\n', "<br>")
+                        )
+                    })
                     .collect::<String>()
             ))
             .collect::<String>()

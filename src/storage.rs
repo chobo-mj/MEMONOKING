@@ -129,10 +129,25 @@ pub struct TabRec {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub enum BlockRec {
+    /// Legacy shape, kept only so old saves keep deserializing: a single
+    /// column width, no merged cells. Never written; a load migrates this
+    /// into a `TableV2` with `positioned: false` and a uniform
+    /// `col_widths`. A new variant name (rather than new fields on this
+    /// one) is what lets that migration tell old data from new on sight.
     Table {
         cells: Vec<Vec<(String, [bool; 4])>>,
         width: f32,
         row_height: f32,
+    },
+    /// Current shape: per-column widths, cell merges, and whether the
+    /// table is positioned inline in the body text (like a picture) or
+    /// always rendered below it (pre-migration tables, until re-saved).
+    TableV2 {
+        id: u32,
+        cells: Vec<Vec<CellRec>>,
+        col_widths: Vec<f32>,
+        row_height: f32,
+        positioned: bool,
     },
     Picture {
         id: u32,
@@ -144,6 +159,15 @@ pub enum BlockRec {
         scale: f32,
         fit: bool,
     },
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct CellRec {
+    pub text: String,
+    pub format: [bool; 4],
+    pub col_span: usize,
+    pub row_span: usize,
+    pub covered: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
@@ -531,18 +555,26 @@ fn tab_rec(t: &Tab) -> TabRec {
             .blocks
             .iter()
             .map(|b| match b {
-                Block::Table(t) => BlockRec::Table {
+                Block::Table(t) => BlockRec::TableV2 {
+                    id: t.id,
                     cells: t
                         .cells
                         .iter()
                         .map(|row| {
                             row.iter()
-                                .map(|c| (c.text.clone(), format_bits(&c.format)))
+                                .map(|c| CellRec {
+                                    text: c.text.clone(),
+                                    format: format_bits(&c.format),
+                                    col_span: c.col_span,
+                                    row_span: c.row_span,
+                                    covered: c.covered,
+                                })
                                 .collect()
                         })
                         .collect(),
-                    width: t.width,
+                    col_widths: t.col_widths.clone(),
                     row_height: t.row_height,
+                    positioned: t.positioned,
                 },
                 Block::Picture(p) => BlockRec::Picture {
                     id: p.id,
@@ -575,11 +607,15 @@ fn tab_from(r: &TabRec) -> Tab {
             .blocks
             .iter()
             .map(|b| match b {
+                // Legacy shape: migrate into the current one, unpositioned
+                // (it always rendered below the text) and with one width
+                // applied to every column.
                 BlockRec::Table {
                     cells,
                     width,
                     row_height,
                 } => Block::Table(Table {
+                    id: 0,
                     cells: cells
                         .iter()
                         .map(|row| {
@@ -587,12 +623,42 @@ fn tab_from(r: &TabRec) -> Tab {
                                 .map(|(text, f)| Cell {
                                     text: text.clone(),
                                     format: bits_format(*f),
+                                    col_span: 1,
+                                    row_span: 1,
+                                    covered: false,
                                 })
                                 .collect()
                         })
                         .collect(),
-                    width: *width,
+                    col_widths: vec![*width; cells.first().map_or(1, Vec::len)],
                     row_height: *row_height,
+                    positioned: false,
+                }),
+                BlockRec::TableV2 {
+                    id,
+                    cells,
+                    col_widths,
+                    row_height,
+                    positioned,
+                } => Block::Table(Table {
+                    id: *id,
+                    cells: cells
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|c| Cell {
+                                    text: c.text.clone(),
+                                    format: bits_format(c.format),
+                                    col_span: c.col_span,
+                                    row_span: c.row_span,
+                                    covered: c.covered,
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                    col_widths: col_widths.clone(),
+                    row_height: *row_height,
+                    positioned: *positioned,
                 }),
                 BlockRec::Picture {
                     id,
@@ -1412,6 +1478,63 @@ mod tests {
         // Saving the restored workspace changes nothing.
         assert!(b.snapshot(&dir) == snap);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn table_round_trips_merges_and_legacy_data_migrates() {
+        let mut table = Table::new(2, 2);
+        table.id = 7;
+        table.positioned = true;
+        table.col_widths = vec![100., 150.];
+        table.cells[0][0].text = "병합된 셀".into();
+        table.cells[0][0].col_span = 2;
+        table.cells[0][1].covered = true;
+        let mut tab = Tab {
+            title: "표".into(),
+            body: String::new(),
+            hidden: false,
+            spans: vec![],
+            blocks: vec![],
+        };
+        tab.blocks.push(Block::Table(table));
+        let rec = tab_rec(&tab);
+        match &rec.blocks[0] {
+            BlockRec::TableV2 { positioned, .. } => assert!(positioned),
+            _ => panic!("always saved as TableV2, never the legacy shape"),
+        }
+        let back = tab_from(&rec);
+        let Block::Table(t) = &back.blocks[0] else {
+            panic!("table restored")
+        };
+        assert_eq!(t.id, 7);
+        assert!(t.positioned);
+        assert_eq!(t.col_widths, vec![100., 150.]);
+        assert_eq!(t.cells[0][0].col_span, 2);
+        assert!(t.cells[0][1].covered);
+
+        // A save made before merges/positioning existed: one uniform width,
+        // no span fields at all.
+        let legacy = TabRec {
+            title: "legacy".into(),
+            blocks: vec![BlockRec::Table {
+                cells: vec![vec![("가".into(), [false; 4]), ("나".into(), [false; 4])]],
+                width: 90.,
+                row_height: 28.,
+            }],
+            ..Default::default()
+        };
+        let migrated = tab_from(&legacy);
+        let Block::Table(t) = &migrated.blocks[0] else {
+            panic!("table restored")
+        };
+        assert!(
+            !t.positioned,
+            "a legacy table always rendered below the text, so it stays that way until re-saved"
+        );
+        assert_eq!(t.col_widths, vec![90., 90.]);
+        assert_eq!(t.cells[0][0].text, "가");
+        assert_eq!(t.cells[0][0].col_span, 1);
+        assert!(!t.cells[0][0].covered);
     }
 
     fn temp(tag: u32) -> PathBuf {
