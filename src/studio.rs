@@ -1279,13 +1279,19 @@ impl App {
                                         ui.label(RichText::new("★").color(STAR).size(17.))
                                             .on_hover_text("중요 메모");
                                     }
-                                    ui.add(
+                                    let title = ui.add(
                                         egui::TextEdit::singleline(&mut self.data.notes[i].title)
                                             .font(font)
                                             .frame(false)
                                             .desired_width(f32::INFINITY)
                                             .hint_text("제목"),
                                     );
+                                    if title.lost_focus()
+                                        && ui.input(|v| v.key_pressed(egui::Key::Enter))
+                                    {
+                                        self.data.notes[i].document.requested_selection =
+                                            Some(0..0);
+                                    }
                                 });
                             } else {
                                 self.note_editor(ui);
