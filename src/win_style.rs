@@ -167,7 +167,14 @@ mod desk {
             return false;
         }
         let h = hwnd as HWND;
-        SetParent(h, layer);
+        // SetParent's return is the window's previous parent on success and
+        // null on failure. Left unchecked, a failed reparent was still
+        // reported as a successful pin: decorations stayed off and the
+        // window never got its title bar back, with no way to tell it had
+        // never actually moved onto the desktop layer.
+        if SetParent(h, layer).is_null() {
+            return false;
+        }
         let mut p = POINT { x: r[0], y: r[1] };
         ScreenToClient(layer, &mut p);
         SetWindowPos(
