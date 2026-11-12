@@ -1933,6 +1933,18 @@ fn picture_rect(galley: &egui::Galley, idx: usize, s: Vec2) -> egui::Rect {
     });
     egui::Rect::from_min_size(egui::pos2(caret.min.x, caret.max.y - s.y - 2.), s)
 }
+/// Where the selected picture's floating size/copy/delete toolbar goes.
+/// Floats above the picture by default; when that would clip above the
+/// visible area (the picture sits near the top of the scroll view), it
+/// drops below the picture instead so it stays reachable.
+fn picture_toolbar_pos(rect: egui::Rect, clip_top: f32) -> egui::Pos2 {
+    let above = rect.left_top() - Vec2::new(0., 34.);
+    if above.y >= clip_top {
+        above
+    } else {
+        rect.left_bottom() + Vec2::new(0., 2.)
+    }
+}
 fn paint_pictures(
     ui: &mut egui::Ui,
     doc: &mut Document,
@@ -2010,7 +2022,7 @@ fn paint_pictures(
         let mut delete = false;
         egui::Area::new(id.with(("picture_tools", pid)))
             .order(egui::Order::Foreground)
-            .fixed_pos(rect.left_top() - Vec2::new(0., 34.))
+            .fixed_pos(picture_toolbar_pos(rect, output.text_clip_rect.top()))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::same(4))
@@ -2888,6 +2900,19 @@ fn shortcut_substitution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn picture_toolbar_drops_below_when_above_would_clip() {
+        let clip_top = 40.;
+        // Plenty of room above: the toolbar floats above the picture.
+        let roomy = egui::Rect::from_min_size(egui::pos2(10., 100.), Vec2::new(200., 80.));
+        let pos = picture_toolbar_pos(roomy, clip_top);
+        assert_eq!(pos, roomy.left_top() - Vec2::new(0., 34.));
+        // The picture sits right at the top of the scroll view: no room
+        // above, so the toolbar drops below the picture instead.
+        let at_top = egui::Rect::from_min_size(egui::pos2(10., 42.), Vec2::new(200., 80.));
+        let pos = picture_toolbar_pos(at_top, clip_top);
+        assert_eq!(pos, at_top.left_bottom() + Vec2::new(0., 2.));
+    }
     #[test]
     fn font_choices_excludes_synthetic_bold_faces_and_the_broken_entry() {
         let names: Vec<&str> = font_choices().collect();

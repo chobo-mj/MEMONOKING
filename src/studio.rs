@@ -858,6 +858,11 @@ pub(crate) fn menu_window<R>(
     paper: Option<Color32>,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Shown<R> {
+    // A borderless always-on-top window is placed by raw screen coordinates
+    // with no OS-level clamping, so a menu opened near a monitor's edge
+    // would otherwise open partly or fully off-screen and be unreachable.
+    let area = crate::native_window::work_area(ctx).unwrap_or_else(|| ctx.screen_rect());
+    let pos = fit_in(pos, size, area);
     let builder = egui::ViewportBuilder::default()
         .with_title("메모 메뉴")
         .with_position(pos)

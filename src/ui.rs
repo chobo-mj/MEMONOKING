@@ -644,6 +644,19 @@ pub fn divider(ui: &mut Ui) {
     );
 }
 
+/// Keep a popup of `size` anchored near `pos` fully inside the current
+/// viewport's screen rect, so a menu opened near an edge (e.g. a right-click
+/// close to the window's bottom or right) is not cut off or left
+/// unreachable. `size` is an estimate when the popup resizes to its content;
+/// that's fine here since this only nudges the anchor, not the final size.
+pub fn clamp_popup_pos(ctx: &egui::Context, pos: Pos2, size: Vec2) -> Pos2 {
+    let area = ctx.screen_rect();
+    Pos2::new(
+        pos.x.min(area.right() - size.x).max(area.left()),
+        pos.y.min(area.bottom() - size.y).max(area.top()),
+    )
+}
+
 pub fn weekday(d: chrono::NaiveDate) -> &'static str {
     use chrono::Datelike;
     ["일", "월", "화", "수", "목", "금", "토"][d.weekday().num_days_from_sunday() as usize]
@@ -1143,4 +1156,37 @@ pub fn banner(ui: &mut Ui, size: Vec2) -> Response {
         Color32::from_white_alpha(215),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_popup_pos_keeps_an_anchor_inside_the_screen() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.));
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                let size = Vec2::new(160., 200.);
+                // Comfortably inside: untouched.
+                let inside = clamp_popup_pos(ctx, Pos2::new(300., 300.), size);
+                assert_eq!(inside, Pos2::new(300., 300.));
+                // Near the bottom-right corner: pulled back so the whole
+                // popup stays on screen.
+                let corner = clamp_popup_pos(ctx, Pos2::new(790., 590.), size);
+                assert_eq!(
+                    corner,
+                    Pos2::new(screen.right() - size.x, screen.bottom() - size.y)
+                );
+                // Negative/near-origin anchors never go further negative.
+                let origin = clamp_popup_pos(ctx, Pos2::new(-50., -50.), size);
+                assert_eq!(origin, Pos2::new(0., 0.));
+            },
+        );
+    }
 }

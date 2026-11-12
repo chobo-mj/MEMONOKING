@@ -384,6 +384,9 @@ impl App {
         };
         let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let mut separate = false;
+        // Right-clicking near the window's bottom or right edge would
+        // otherwise open this menu partly off-screen.
+        let at = ui::clamp_popup_pos(ctx, at, Vec2::new(160., 200.));
         let shown = egui::Area::new(egui::Id::new("calendar_view_menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(at)
