@@ -623,6 +623,33 @@ pub fn footer(
     let id = ui.make_persistent_id(id);
     render_footer(ui, doc, id, trailing_space, false, divider, true)
 }
+/// Maps a char-index cursor position from `old` text to `new` text after an
+/// external edit replaced some span of `old` with different content. A
+/// position inside the untouched common prefix or suffix is preserved; a
+/// position inside the replaced middle region is clamped to just after the
+/// common prefix (i.e. where the replacement starts).
+fn remap_cursor(old: &str, new: &str, idx: usize) -> usize {
+    let old: Vec<char> = old.chars().collect();
+    let new: Vec<char> = new.chars().collect();
+    let max_common = old.len().min(new.len());
+    let prefix = old
+        .iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut suffix = 0;
+    while suffix < max_common - prefix && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    if idx <= prefix {
+        idx.min(new.len())
+    } else if idx >= old.len() - suffix {
+        new.len() - (old.len() - idx)
+    } else {
+        prefix
+    }
+}
 fn content_impl(
     ui: &mut egui::Ui,
     legacy_body: &mut String,
@@ -638,9 +665,31 @@ fn content_impl(
         doc.first_tab_changed = false;
     }
     if doc.tabs[0].body != *legacy_body {
+        let old_body = doc.tabs[0].body.clone();
         let tab = &mut doc.tabs[0];
         transform_spans(&tab.body, legacy_body, &mut tab.spans, &Format::default());
         tab.body = legacy_body.clone();
+        // `legacy_body` was changed from outside this widget (e.g. the
+        // #project-tag auto-conversion stripping its prefix from the note
+        // body). The TextEdit for tab 0 may still have a cursor/IME state
+        // persisted against the *old* text; left alone, the next keystroke
+        // lands at a stale char index and corrupts composition (notably for
+        // Hangul). Remap the persisted cursor onto the new text so typing
+        // continues from the right place.
+        if doc.active == 0 {
+            let text_id = id.with(("text", 0usize));
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), text_id) {
+                if let Some(range) = state.cursor.char_range() {
+                    let new_primary = remap_cursor(&old_body, legacy_body, range.primary.index);
+                    let new_secondary = remap_cursor(&old_body, legacy_body, range.secondary.index);
+                    state.cursor.set_char_range(Some(CCursorRange {
+                        primary: CCursor::new(new_primary),
+                        secondary: CCursor::new(new_secondary),
+                    }));
+                    state.store(ui.ctx(), text_id);
+                }
+            }
+        }
     }
     let requested = doc.requested_selection.take();
     let requested_tab = doc.requested_tab.take();
@@ -2900,6 +2949,97 @@ fn shortcut_substitution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remap_cursor_moves_to_the_cut_point_when_a_leading_prefix_is_removed() {
+        // "#프로젝트 " (5 chars incl. the trailing space) is stripped from the
+        // front, as consume_body_project does. A cursor that was right after
+        // the stripped prefix should land at the very start of what's left.
+        let old = "#프로젝트 나머지내용";
+        let new = "나머지내용";
+        assert_eq!(remap_cursor(old, new, 5), 0);
+        // A cursor further into the untouched tail keeps its relative
+        // distance from the end.
+        assert_eq!(
+            remap_cursor(old, new, old.chars().count()),
+            new.chars().count()
+        );
+    }
+    #[test]
+    fn remap_cursor_keeps_a_position_inside_an_untouched_common_prefix() {
+        let old = "안녕하세요 세계";
+        let new = "안녕하세요 월드";
+        // "안녕하세요 " is common to both; a cursor inside it is unaffected.
+        assert_eq!(remap_cursor(old, new, 3), 3);
+    }
+    #[test]
+    fn remap_cursor_clamps_a_position_inside_the_replaced_middle_region() {
+        let old = "앞 가운데 뒤";
+        let new = "앞 뒤";
+        // "가운데" was removed from the middle; a cursor that was inside it
+        // clamps to right after the common prefix ("앞 ").
+        let inside = old.chars().position(|c| c == '운').unwrap();
+        assert_eq!(remap_cursor(old, new, inside), 2);
+    }
+    #[test]
+    fn project_tag_strip_remaps_a_live_cursor_instead_of_leaving_it_stale() {
+        // Reproduces #62: typing "#프로젝트 " at the body's start and letting
+        // the project-tag conversion strip that prefix (as desktop.rs's
+        // consume_body_project does) must not leave the TextEdit's persisted
+        // cursor pointing at a now-invalid char index in the shorter text,
+        // which is what corrupted subsequent Hangul composition.
+        let mut body = "#프로젝트 나머지내용".to_owned();
+        let mut doc = Document::default();
+        let id = "project_tag_cursor_test";
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400., 300.));
+        // First frame: render once so the TextEdit's state exists, then
+        // place its cursor right after the "#프로젝트 " prefix (char index 5),
+        // mimicking where the user's caret sits right after typing the
+        // triggering space.
+        let mut text_id = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // The TextEdit response's id is the editor's real
+                    // `text_id` for the active tab, salted by the enclosing
+                    // Ui's own id (unlike a bare `Id::new(id)`).
+                    text_id = Some(show(ui, &mut body, &mut doc, id).id);
+                });
+            },
+        );
+        let text_id = text_id.unwrap();
+        let mut state = egui::TextEdit::load_state(&ctx, text_id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::one(CCursor::new(5))));
+        state.store(&ctx, text_id);
+        // The project-tag conversion mutates the legacy body externally,
+        // outside this editor, exactly like consume_body_project does.
+        body.replace_range(.."#프로젝트 ".len(), "");
+        // Next frame: content_impl must notice the external change and
+        // remap the stale cursor rather than leave it at index 5 (now past
+        // the end of the shrunk "나머지내용" selection start).
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show(ui, &mut body, &mut doc, id);
+                });
+            },
+        );
+        let state = egui::TextEdit::load_state(&ctx, text_id).unwrap();
+        let range = state.cursor.char_range().unwrap();
+        assert_eq!(range.primary.index, 0);
+        assert_eq!(range.secondary.index, 0);
+        assert_eq!(body, "나머지내용");
+    }
     #[test]
     fn picture_toolbar_drops_below_when_above_would_clip() {
         let clip_top = 40.;
