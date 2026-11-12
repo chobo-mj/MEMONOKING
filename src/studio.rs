@@ -1009,6 +1009,7 @@ impl App {
                 .with_transparent(true)
                 .with_decorations(false)
                 .with_taskbar(self.desktop.taskbar)
+                .with_icon(crate::app_icon::window())
                 .with_window_level(if top {
                     egui::WindowLevel::AlwaysOnTop
                 } else {

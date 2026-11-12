@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod alarm;
+mod app_icon;
 mod calendar_dock;
 mod catalog;
 mod composer;
@@ -433,8 +434,11 @@ impl eframe::App for App {
                     self.new_sticker();
                 }
                 tray::Action::Quit => {
+                    // `ViewportCommand::Close` only takes effect on the root
+                    // viewport in response to a real OS close request, so it
+                    // cannot end the program by itself here: exit directly.
                     self.autosave(0., true);
-                    ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
+                    std::process::exit(0);
                 }
             }
         }
@@ -546,7 +550,8 @@ impl App {
             .with_title("OmniMemoJang")
             .with_inner_size([1440., 900.])
             .with_min_inner_size([980., 640.])
-            .with_maximized(true);
+            .with_maximized(true)
+            .with_icon(app_icon::window());
         root.show_viewport_immediate(main_viewport(), builder, |ctx, _| {
             self.theme(ctx);
             self.drag_input(ctx);
@@ -987,7 +992,8 @@ fn main() -> eframe::Result {
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_transparent(true)
-                .with_taskbar(false),
+                .with_taskbar(false)
+                .with_icon(app_icon::window()),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),

@@ -79,7 +79,7 @@ impl Default for Desktop {
             opacity: 100.,
             image_scale: 3,
             autostart: false,
-            taskbar: true,
+            taskbar: false,
             retention: 1,
             auto_lock: 1,
             sound: true,

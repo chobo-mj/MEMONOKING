@@ -35,7 +35,7 @@ impl Tray {
             let _ = menu.append(&sticker);
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&quit);
-            let icon = tray_icon::Icon::from_rgba(icon_pixels(), 32, 32)
+            let icon = tray_icon::Icon::from_rgba(crate::app_icon::tray_rgba(), 32, 32)
                 .ok()
                 .and_then(|icon| {
                     tray_icon::TrayIconBuilder::new()
@@ -142,40 +142,4 @@ pub fn single_instance() -> bool {
     }
     #[cfg(not(windows))]
     true
-}
-
-/// A 32×32 icon: a rounded note in the app's slate color with three lines.
-#[cfg(any(windows, test))]
-fn icon_pixels() -> Vec<u8> {
-    let mut px = vec![0u8; 32 * 32 * 4];
-    for y in 0..32 {
-        for x in 0..32 {
-            // Rounded square from 2 to 29, corner radius 6.
-            let (cx, cy) = (x.clamp(8, 23), y.clamp(8, 23));
-            let (dx, dy) = (x as f32 - cx as f32, y as f32 - cy as f32);
-            let inside = (2..30).contains(&x) && (2..30).contains(&y) && dx * dx + dy * dy <= 36.;
-            if !inside {
-                continue;
-            }
-            let line = (9..23).contains(&x) && [10, 15, 20].contains(&y);
-            let c = if line {
-                [255, 255, 255, 255]
-            } else {
-                [74, 98, 120, 255]
-            };
-            px[(y * 32 + x) * 4..][..4].copy_from_slice(&c);
-        }
-    }
-    px
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn icon_is_32_by_32_rgba_with_transparent_corners() {
-        let px = super::icon_pixels();
-        assert_eq!(px.len(), 32 * 32 * 4);
-        assert_eq!(px[3], 0);
-        assert_eq!(px[(16 * 32 + 16) * 4 + 3], 255);
-    }
 }
