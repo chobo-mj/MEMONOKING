@@ -67,12 +67,24 @@ pub struct Catalog {
     table_viewport_width: f32,
     table_width: f32,
     pub preview_width: f32,
+    /// User-adjusted widths for the 완료/알람/생성일/일정 columns (table
+    /// indices 1, 4, 5, 6). `0.` means "not customized, use the default".
+    pub column_widths: [f32; 4],
+    /// Whether the 완료/알람/생성일/일정 columns are hidden. Defaulting to
+    /// `false` (all visible) falls out of `#[derive(Default)]` for free.
+    pub column_hidden: [bool; 4],
 }
 
 /// Fixed columns stay compact; title (2) and body (3) share the rest.
 const COLUMN_WIDTHS: [f32; 8] = [30., 30., 0., 0., 96., 58., 86., 30.];
 /// The narrowest table: below this the list scrolls horizontally.
 const TABLE_WIDTH: f32 = 560.;
+/// Table indices of the four columns a user can resize or hide, and their
+/// labels in the same order as `Catalog::column_widths`/`column_hidden`.
+const ADJUSTABLE_COLUMNS: [(usize, &str); 4] =
+    [(1, "완료"), (4, "알람"), (5, "생성일"), (6, "일정")];
+const ADJUSTABLE_MIN_WIDTH: f32 = 24.;
+const ADJUSTABLE_MAX_WIDTH: f32 = 220.;
 
 #[derive(Clone, Copy)]
 enum TableRow {
@@ -92,12 +104,30 @@ enum TableCommand {
     PurgeTab(usize, usize),
 }
 
+/// The effective width of one of the four user-adjustable columns: hidden
+/// collapses it to zero, a custom width (stored as non-zero) overrides the
+/// default, otherwise it keeps its original default width.
+fn adjustable_width(cat: &Catalog, slot: usize) -> f32 {
+    if cat.column_hidden[slot] {
+        0.
+    } else if cat.column_widths[slot] > 0. {
+        cat.column_widths[slot]
+    } else {
+        COLUMN_WIDTHS[ADJUSTABLE_COLUMNS[slot].0]
+    }
+}
+
 /// Column rectangles. The title and body columns take all width left by the
-/// compact fixed columns, so they grow and shrink with the list pane.
-fn table_cells(rect: egui::Rect) -> [egui::Rect; 8] {
-    let fixed: f32 = COLUMN_WIDTHS.iter().sum();
-    let flex = (rect.width().max(TABLE_WIDTH) - fixed).max(0.);
+/// compact fixed columns, so they grow and shrink with the list pane. The
+/// 완료/알람/생성일/일정 columns additionally honor the user's resize/hide
+/// choices in `cat.column_widths`/`cat.column_hidden`.
+fn table_cells(rect: egui::Rect, cat: &Catalog) -> [egui::Rect; 8] {
     let mut widths = COLUMN_WIDTHS;
+    for (slot, &(idx, _)) in ADJUSTABLE_COLUMNS.iter().enumerate() {
+        widths[idx] = adjustable_width(cat, slot);
+    }
+    let fixed: f32 = widths.iter().sum::<f32>() - widths[2] - widths[3];
+    let flex = (rect.width().max(TABLE_WIDTH) - fixed).max(0.);
     widths[2] = (flex * 0.38).max(110.);
     widths[3] = (flex - widths[2]).max(0.);
     let mut x = rect.left();
@@ -393,6 +423,16 @@ impl App {
                     }
                 });
             ui.checkbox(&mut self.catalog.wiki_only, "위키만 보기");
+            egui::ComboBox::from_id_salt("catalog_column_picker")
+                .selected_text("열 표시")
+                .show_ui(ui, |ui| {
+                    for (slot, &(_, label)) in ADJUSTABLE_COLUMNS.iter().enumerate() {
+                        let mut visible = !self.catalog.column_hidden[slot];
+                        if ui.checkbox(&mut visible, label).changed() {
+                            self.catalog.column_hidden[slot] = !visible;
+                        }
+                    }
+                });
         });
         ui.add_space(8.);
     }
@@ -666,7 +706,7 @@ impl App {
                     [rect.left_bottom(), rect.right_bottom()],
                     Stroke::new(1_f32, ui::t(ui).line),
                 );
-                let cells = table_cells(rect);
+                let cells = table_cells(rect, &self.catalog);
                 for (col, title) in [
                     if trash { "복원" } else { "표시" },
                     "완료",
@@ -685,6 +725,33 @@ impl App {
                         egui::Label::new(RichText::new(*title).size(12.).color(MUTED).strong())
                             .truncate(),
                     );
+                }
+                for (slot, &(idx, _)) in ADJUSTABLE_COLUMNS.iter().enumerate() {
+                    if self.catalog.column_hidden[slot] {
+                        continue;
+                    }
+                    let handle = egui::Rect::from_min_max(
+                        egui::pos2(cells[idx].right() - 3., rect.top()),
+                        egui::pos2(cells[idx].right() + 3., rect.bottom()),
+                    );
+                    let drag = ui
+                        .interact(handle, ui.id().with(("column_resize", idx)), Sense::drag())
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                        .on_hover_text("드래그해서 열 너비 조절 · 더블클릭으로 기본값");
+                    if drag.hovered() || drag.dragged() {
+                        ui.painter().line_segment(
+                            [handle.center_top(), handle.center_bottom()],
+                            Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.6)),
+                        );
+                    }
+                    if drag.dragged() {
+                        let current = adjustable_width(&self.catalog, slot);
+                        self.catalog.column_widths[slot] = (current + drag.drag_delta().x)
+                            .clamp(ADJUSTABLE_MIN_WIDTH, ADJUSTABLE_MAX_WIDTH);
+                    }
+                    if drag.double_clicked() {
+                        self.catalog.column_widths[slot] = 0.;
+                    }
                 }
             });
         let mut pending = vec![];
@@ -820,7 +887,7 @@ impl App {
                         .gamma_multiply(0.18),
                 ),
             );
-            let cells = table_cells(rect);
+            let cells = table_cells(rect, &self.catalog);
             {
                 let mut c = table_cell(ui, cells[0], "eye");
                 if trash {
@@ -2503,13 +2570,45 @@ mod tests {
         render_table_layout(&mut a, &ctx, 700.);
         render_table_layout(&mut a, &ctx, 700.);
         let visible = a.catalog.table_viewport_width;
-        let last = table_cells(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            Vec2::new(TABLE_WIDTH, 48.),
-        ))[7];
+        let last = table_cells(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(TABLE_WIDTH, 48.)),
+            &a.catalog,
+        )[7];
         assert!(last.center().x - a.catalog.table_offset > 0.);
         assert!(last.right() - a.catalog.table_offset <= visible + 1.);
     }
+
+    #[test]
+    fn hidden_columns_collapse_to_zero_and_custom_widths_are_honored() {
+        let base = Catalog::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400., 48.));
+        let default_cells = table_cells(rect, &base);
+        // 알람 (slot 1 -> column 4) starts at its default width.
+        assert_eq!(default_cells[4].width(), COLUMN_WIDTHS[4]);
+
+        let mut hidden = Catalog::default();
+        hidden.column_hidden[1] = true;
+        let cells = table_cells(rect, &hidden);
+        assert_eq!(cells[4].width(), 0.);
+        // The space freed by hiding 알람 goes to 내용 (column 3), not lost.
+        assert!(cells[3].width() > default_cells[3].width());
+
+        let mut resized = Catalog::default();
+        resized.column_widths[1] = 150.;
+        let cells = table_cells(rect, &resized);
+        assert_eq!(cells[4].width(), 150.);
+
+        // Out-of-range custom widths are clamped where they're applied in
+        // the UI (the drag handler), not inside table_cells itself; a
+        // sentinel of exactly 0. still falls back to the default rather
+        // than collapsing the column, so "not customized" and "hidden" stay
+        // distinct states.
+        let mut zeroed = Catalog::default();
+        zeroed.column_widths[1] = 0.;
+        let cells = table_cells(rect, &zeroed);
+        assert_eq!(cells[4].width(), COLUMN_WIDTHS[4]);
+    }
+
     #[test]
     fn folder_drop_uses_real_rendered_note_and_folder_bounds() {
         let mut a = App::sample(Local::now().date_naive());
