@@ -195,6 +195,7 @@ impl App {
         }
         let mut minimize = false;
         let mut stand = false;
+        let mut stand_rect = Rect::NOTHING;
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("calendar"),
             builder,
@@ -228,25 +229,9 @@ impl App {
                     )
                     .show(ctx, |ui| {
                         let (pressed, button) = self.calendar_toolbar(ui, &mut minimize);
+                        stand_rect = button;
                         if pressed {
                             stand = true;
-                        }
-                        // The calendar keeps its current place on the desktop,
-                        // so the button's screen rect is known from here.
-                        if stand && !standing {
-                            if let (Some(hwnd), Some(i), Some(o)) =
-                                (crate::win_style::hwnd(ctx), inner, outer)
-                            {
-                                self.cal.standing = Some(Standing {
-                                    hwnd,
-                                    rect: px(i, ppp),
-                                    outer: px(o, ppp),
-                                    button: px(button.translate(i.min.to_vec2()), ppp),
-                                    pinned: false,
-                                    wait: 3,
-                                    click: None,
-                                });
-                            }
                         }
                         ui.add_space(6.);
                         self.cal.painting = true;
@@ -257,8 +242,27 @@ impl App {
                         }
                         self.cal.painting = false;
                     });
-                if !standing {
-                    self.calendar_view_menu(ctx);
+                if !standing && self.calendar_view_menu(ctx) {
+                    stand = true;
+                }
+                // The calendar keeps its current place on the desktop, so
+                // the stand button's screen rect is known from here. Either
+                // the toolbar icon or the right-click "캘린더 분리하기" menu
+                // entry can trigger this.
+                if stand && !standing {
+                    if let (Some(hwnd), Some(i), Some(o)) =
+                        (crate::win_style::hwnd(ctx), inner, outer)
+                    {
+                        self.cal.standing = Some(Standing {
+                            hwnd,
+                            rect: px(i, ppp),
+                            outer: px(o, ppp),
+                            button: px(stand_rect.translate(i.min.to_vec2()), ppp),
+                            pinned: false,
+                            wait: 3,
+                            click: None,
+                        });
+                    }
                 }
             },
         );
@@ -359,8 +363,11 @@ impl App {
         }
     }
     /// Right-click anywhere in the calendar window: month, 1-week or
-    /// 2-week view (the same setting as Settings › Calendar).
-    fn calendar_view_menu(&mut self, ctx: &egui::Context) {
+    /// 2-week view (the same setting as Settings › Calendar), plus
+    /// "캘린더 분리하기" to pin the calendar to the desktop (the same action
+    /// as the toolbar's stand icon). Returns whether that entry was clicked,
+    /// so the caller can pin the window the same way the toolbar does.
+    fn calendar_view_menu(&mut self, ctx: &egui::Context) -> bool {
         let (secondary, pressed, pointer) = ctx.input(|i| {
             (
                 i.pointer.secondary_clicked(),
@@ -370,12 +377,13 @@ impl App {
         });
         if secondary {
             self.cal.view_menu = pointer;
-            return;
+            return false;
         }
         let Some(at) = self.cal.view_menu else {
-            return;
+            return false;
         };
         let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let mut separate = false;
         let shown = egui::Area::new(egui::Id::new("calendar_view_menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(at)
@@ -405,6 +413,19 @@ impl App {
                             close = true;
                         }
                     }
+                    ui.separator();
+                    if ui
+                        .add(
+                            egui::Button::new("캘린더 분리하기")
+                                .frame(false)
+                                .min_size(Vec2::new(140., 26.)),
+                        )
+                        .on_hover_text("바탕화면에 고정 · 도구줄의 스탠딩 아이콘과 같은 동작")
+                        .clicked()
+                    {
+                        separate = true;
+                        close = true;
+                    }
                 });
             });
         // A click outside the menu closes it.
@@ -414,6 +435,7 @@ impl App {
         if close {
             self.cal.view_menu = None;
         }
+        separate
     }
     /// Theme picker, standing toggle and the big minimize button. Returns
     /// whether the standing button was pressed and its rect.
