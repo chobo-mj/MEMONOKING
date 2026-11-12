@@ -36,6 +36,12 @@ fn wiki_left_col_bounds(inner_width: f32) -> (f32, f32) {
     let min = 160.;
     (min, (inner_width - 260.).max(min))
 }
+/// The wiki tab to fall back to when the current one is out of range or
+/// deleted: the lowest-indexed tab that isn't deleted, or `0` if every tab
+/// is somehow deleted (the UI never actually allows deleting the last one).
+fn next_wiki_tab(len: usize, deleted: &std::collections::HashSet<usize>) -> usize {
+    (0..len).find(|t| !deleted.contains(t)).unwrap_or(0)
+}
 /// Split `available` width (minus `gap`) between the wiki's two content
 /// panes by `frac` (pane 0's share), each kept at least 160px wide.
 fn wiki_pane_widths(frac: f32, available: f32, gap: f32) -> (f32, f32) {
@@ -359,8 +365,11 @@ impl App {
     /// unfiled wiki memos (②); on the right two areas that show memos side
     /// by side for comparison.
     pub fn wiki(&mut self, ui: &mut egui::Ui) {
-        if self.extra.wiki_tab >= self.extra.wiki_tabs.len() {
-            self.extra.wiki_tab = 0;
+        if self.extra.wiki_tab >= self.extra.wiki_tabs.len()
+            || self.extra.deleted_wiki_tabs.contains(&self.extra.wiki_tab)
+        {
+            self.extra.wiki_tab =
+                next_wiki_tab(self.extra.wiki_tabs.len(), &self.extra.deleted_wiki_tabs);
         }
         for pane in &mut self.extra.wiki_panes {
             if pane.is_some_and(|i| i >= self.data.notes.len() || self.data.notes[i].deleted) {
@@ -501,6 +510,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.;
             for t in 0..self.extra.wiki_tabs.len() {
+                if self.extra.deleted_wiki_tabs.contains(&t) {
+                    continue;
+                }
                 if self.extra.wiki_rename == Some(crate::extras::WikiRename::Tab(t)) {
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.extra.wiki_tabs[t]).desired_width(90.),
@@ -512,13 +524,23 @@ impl App {
                     continue;
                 }
                 let on = self.extra.wiki_tab == t;
+                let base = self
+                    .extra
+                    .wiki_tab_colors
+                    .get(&t)
+                    .copied()
+                    .unwrap_or(ACCENT);
                 let text = egui::RichText::new(&self.extra.wiki_tabs[t])
                     .size(13.)
                     .color(if on { egui::Color32::WHITE } else { tone.ink });
                 let r = ui
                     .add(
                         egui::Button::new(text)
-                            .fill(if on { ACCENT } else { tone.accent_soft })
+                            .fill(if on {
+                                base
+                            } else {
+                                crate::ui::lerp_color(tone.bg, base, 0.22)
+                            })
                             .corner_radius(egui::CornerRadius {
                                 nw: 8,
                                 ne: 8,
@@ -541,6 +563,43 @@ impl App {
                         self.extra.wiki_rename = Some(crate::extras::WikiRename::Tab(t));
                         ui.close_menu();
                     }
+                    ui.menu_button("색 바꾸기", |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for c in PALETTE {
+                                let (rect, cr) =
+                                    ui.allocate_exact_size(Vec2::splat(22.), egui::Sense::click());
+                                ui.painter().circle_filled(rect.center(), 9., c);
+                                if self.extra.wiki_tab_colors.get(&t) == Some(&c) {
+                                    ui.painter().circle_stroke(
+                                        rect.center(),
+                                        10.5,
+                                        egui::Stroke::new(2.0_f32, ACCENT),
+                                    );
+                                }
+                                if cr.clicked() {
+                                    self.extra.wiki_tab_colors.insert(t, c);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    });
+                    let remaining = self.extra.wiki_tabs.len() - self.extra.deleted_wiki_tabs.len();
+                    ui.add_enabled_ui(remaining > 1, |ui| {
+                        if ui
+                            .button(RichText::new("삭제").color(ACCENT))
+                            .on_disabled_hover_text("마지막 위키 탭은 삭제할 수 없습니다")
+                            .clicked()
+                        {
+                            self.extra.deleted_wiki_tabs.insert(t);
+                            if self.extra.wiki_tab == t {
+                                self.extra.wiki_tab = next_wiki_tab(
+                                    self.extra.wiki_tabs.len(),
+                                    &self.extra.deleted_wiki_tabs,
+                                );
+                            }
+                            ui.close_menu();
+                        }
+                    });
                 });
                 self.targets.push(crate::dragging::Target {
                     viewport: ui.ctx().viewport_id(),
@@ -1181,6 +1240,30 @@ mod tests {
             let (p0, p1) = wiki_pane_widths(frac, 500., 10.);
             assert_eq!((p0, p1), (330., 160.));
         }
+    }
+    #[test]
+    fn next_wiki_tab_skips_deleted_tabs_and_falls_back_to_zero() {
+        let deleted = std::collections::HashSet::from([0, 2]);
+        assert_eq!(next_wiki_tab(4, &deleted), 1);
+        assert_eq!(next_wiki_tab(4, &std::collections::HashSet::new()), 0);
+        // Every tab deleted: falls back to 0 rather than panicking. The UI
+        // itself never lets the last remaining tab be deleted.
+        let all = std::collections::HashSet::from([0, 1]);
+        assert_eq!(next_wiki_tab(2, &all), 0);
+    }
+    #[test]
+    fn deleting_the_active_wiki_tab_moves_selection_to_the_next_one() {
+        let mut a = app();
+        a.extra.wiki_tabs.push("위키 2".into());
+        a.extra.wiki_tab = 0;
+        a.extra.wiki_tab_colors.insert(0, egui::Color32::RED);
+        a.extra.deleted_wiki_tabs.insert(0);
+        a.extra.wiki_tab = next_wiki_tab(a.extra.wiki_tabs.len(), &a.extra.deleted_wiki_tabs);
+        assert_eq!(a.extra.wiki_tab, 1);
+        // Deleting hides the tab but keeps its stored color/data around
+        // rather than discarding it outright.
+        assert_eq!(a.extra.wiki_tab_colors.get(&0), Some(&egui::Color32::RED));
+        assert_eq!(a.extra.wiki_tabs.len(), 2);
     }
     #[test]
     fn no_project_filter_is_distinct_from_all() {

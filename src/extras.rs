@@ -102,6 +102,14 @@ pub struct Extra {
     pub table_search: String,
     pub bookmarks: Vec<(String, String)>,
     pub size_applied: Option<(usize, u8)>,
+    /// Custom colors for wiki tabs that have had one picked; tabs without an
+    /// entry here use the default accent color.
+    pub wiki_tab_colors: HashMap<usize, Color32>,
+    /// Wiki tabs hidden from the tab bar (and so unreachable, along with
+    /// their folder tree) without actually removing them from `wiki_tabs` -
+    /// the same soft-delete approach `deleted_projects` already uses, so
+    /// indices into `wiki_tabs` and `Folder::tab` never need reshuffling.
+    pub deleted_wiki_tabs: HashSet<usize>,
     /// Width of the wiki's left tree/unfiled column, in pixels. `0.` keeps
     /// the proportional default (22% of the wiki area, clamped 210-280).
     pub wiki_left_width: f32,
@@ -171,6 +179,8 @@ impl Default for Extra {
             table_search: String::new(),
             bookmarks: vec![("프로젝트 참고 자료".into(), "https://example.com".into())],
             size_applied: None,
+            wiki_tab_colors: HashMap::new(),
+            deleted_wiki_tabs: HashSet::new(),
             wiki_left_width: 0.,
             wiki_pane_frac: 0.5,
         }
