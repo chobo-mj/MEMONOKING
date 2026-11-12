@@ -371,6 +371,29 @@ pub fn data_dir(custom: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("omnimemojang-data"))
 }
 
+/// On the very first run, lets the user choose where memos and schedules
+/// are stored instead of silently defaulting to the Windows app-data
+/// folder. Cancelling the folder picker (or this platform having no
+/// dialog backend) keeps the default; `data_path` is only changed when a
+/// folder is actually chosen.
+fn prompt_first_run_data_dir(data_path: &mut String) {
+    rfd::MessageDialog::new()
+        .set_title("OmniMemoJang")
+        .set_description(
+            "메모와 일정을 저장할 폴더를 선택해주세요.\n\
+             선택하지 않고 넘어가면 기본 위치(앱 데이터 폴더)에 저장됩니다.\n\
+             나중에 설정에서 언제든지 바꿀 수 있습니다.",
+        )
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    if let Some(path) = rfd::FileDialog::new()
+        .set_title("데이터 저장 폴더 선택")
+        .pick_folder()
+    {
+        *data_path = path.display().to_string();
+    }
+}
+
 /// Folders searched for picture files, current data folder first (an older
 /// one stays while its pictures are copied after the data folder changed).
 static IMAGE_DIRS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -1076,6 +1099,9 @@ impl App {
     /// guide. The guide page opens only on the very first run; later runs
     /// open the start page chosen in settings.
     pub fn load_or_start(&mut self) {
+        if !self.prefs.first_run_done && self.prefs.data_path.trim().is_empty() {
+            prompt_first_run_data_dir(&mut self.prefs.data_path);
+        }
         let dir = data_dir(&self.prefs.data_path);
         use_image_dir(&dir);
         match read(&dir) {
