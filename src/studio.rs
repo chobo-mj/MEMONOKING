@@ -33,6 +33,13 @@ pub struct Window {
     menu: Option<Menu>,
     /// Where the window was last seen on screen, for reopening it there.
     last_pos: Option<Pos2>,
+    /// Set when Enter is pressed in the sticker title; applied at the start
+    /// of the *next* frame, never the one Enter was pressed on. The title's
+    /// return_key handling does not remove that Enter (or a pending IME
+    /// commit) from this frame's input, so requesting focus on the body in
+    /// the same frame let its own TextEdit see the same event again and
+    /// insert a stray newline (or duplicate the just-composed character).
+    move_caret_to_body: bool,
 }
 /// Desktop arrangement requested from a sticker's context menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +76,7 @@ impl Window {
             swatch_drag: None,
             menu: None,
             last_pos: None,
+            move_caret_to_body: false,
         }
     }
     /// What is needed to reopen this window after a restart.
@@ -1021,6 +1029,10 @@ impl App {
             }
             root.show_viewport_immediate(viewport(i), builder, |ctx, _| {
                 self.theme(ctx);
+                if w.move_caret_to_body {
+                    w.move_caret_to_body = false;
+                    self.data.notes[i].document.requested_selection = Some(0..0);
+                }
                 let maximized = ctx.input(|v| v.viewport().maximized.unwrap_or(false));
                 let changed = w.applied != Some(key);
                 if changed {
@@ -1289,8 +1301,9 @@ impl App {
                                     if title.lost_focus()
                                         && ui.input(|v| v.key_pressed(egui::Key::Enter))
                                     {
-                                        self.data.notes[i].document.requested_selection =
-                                            Some(0..0);
+                                        // Deferred to next frame; see
+                                        // `move_caret_to_body`'s doc comment.
+                                        w.move_caret_to_body = true;
                                     }
                                 });
                             } else {
