@@ -870,11 +870,16 @@ impl App {
     /// Dialogs that belong to the application rather than to one window.
     fn global_dialogs(&mut self, ctx: &egui::Context) {
         let mut open = self.settings;
+        // The settings dialog's own text grows with the user's font-size
+        // setting (it shares the app's style), so a fixed height would make
+        // the taller tabs need scrolling at larger sizes. Grow the window
+        // with it instead.
+        let settings_height = 620. * (self.desktop.font_size / 10.).clamp(1.0, 1.6);
         ui::dialog(
             ctx,
             "settings",
             "설정",
-            [860., 620.],
+            [860., settings_height],
             false,
             &mut open,
             |ui| self.ppt_settings(ui),
