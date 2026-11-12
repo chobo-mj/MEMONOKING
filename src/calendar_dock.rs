@@ -107,6 +107,13 @@ pub struct Dock {
     standing: Option<Standing>,
     /// Where the right-click view menu (month / 1 week / 2 weeks) is open.
     view_menu: Option<Pos2>,
+    /// True: the detached window shows the grid and the day's memos side by
+    /// side instead of stacked.
+    pub horizontal: bool,
+    /// Fraction of the horizontal layout's width given to the day-detail
+    /// pane on the right. Kept as a fraction (not pixels) so the split stays
+    /// proportional as the window is resized.
+    split_frac: f32,
 }
 
 impl Default for Dock {
@@ -126,6 +133,8 @@ impl Default for Dock {
             painting: false,
             standing: None,
             view_menu: None,
+            horizontal: false,
+            split_frac: 1. / 3.,
         }
     }
 }
@@ -241,7 +250,11 @@ impl App {
                         }
                         ui.add_space(6.);
                         self.cal.painting = true;
-                        egui::ScrollArea::vertical().show(ui, |ui| self.calendar(ui));
+                        if self.cal.horizontal {
+                            self.calendar_horizontal(ui);
+                        } else {
+                            egui::ScrollArea::vertical().show(ui, |ui| self.calendar(ui));
+                        }
                         self.cal.painting = false;
                     });
                 if !standing {
@@ -253,6 +266,72 @@ impl App {
         if minimize && self.cal.standing.is_none() {
             self.cal.minimize_to_box();
         }
+    }
+    /// The grid on the left and the selected day's memos on the right,
+    /// separated by a draggable splitter. `self.cal.split_frac` is a
+    /// fraction of the available width, not a pixel count, so dragging the
+    /// window itself keeps both panes' proportions rather than clipping one.
+    fn calendar_horizontal(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.available_rect_before_wrap();
+        let height = rect.height();
+        let total = rect.width();
+        let handle_w = 12.;
+        let min_right = 220.0_f32.min((total - handle_w) * 0.5);
+        let max_right = (total - handle_w - 320.).max(min_right);
+        let right_w = (total * self.cal.split_frac).clamp(min_right, max_right);
+        let left_w = (total - handle_w - right_w).max(240.);
+
+        let left_rect = Rect::from_min_size(rect.min, Vec2::new(left_w, height));
+        let handle = Rect::from_min_max(
+            egui::pos2(left_rect.right(), rect.top()),
+            egui::pos2(left_rect.right() + handle_w, rect.bottom()),
+        );
+        let right_rect = Rect::from_min_size(
+            egui::pos2(handle.right(), rect.top()),
+            Vec2::new(total - left_w - handle_w, height),
+        );
+
+        let mut left = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("cal_grid_pane")
+                .max_rect(left_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        left.set_clip_rect(ui.clip_rect().intersect(left_rect));
+        egui::ScrollArea::vertical()
+            .id_salt("cal_grid_scroll")
+            .show(&mut left, |ui| self.calendar_grid(ui));
+
+        let drag = ui
+            .interact(
+                handle,
+                ui.id().with("cal_horizontal_splitter"),
+                Sense::drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if drag.hovered() || drag.dragged() {
+            ui.painter().line_segment(
+                [handle.center_top(), handle.center_bottom()],
+                Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.6)),
+            );
+        }
+        if drag.dragged() {
+            let new_right = (right_w - drag.drag_delta().x).clamp(min_right, max_right);
+            self.cal.split_frac = (new_right / total).clamp(0.15, 0.75);
+        }
+
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("cal_detail_pane")
+                .max_rect(right_rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
+        right.set_clip_rect(ui.clip_rect().intersect(right_rect));
+        egui::ScrollArea::vertical()
+            .id_salt("cal_detail_scroll")
+            .show(&mut right, |ui| self.calendar_day_detail(ui));
+
+        ui.allocate_rect(rect, Sense::hover());
     }
     /// Pin, poll and unpin the standing calendar.
     fn standing_frame(&mut self, button_clicked: bool) {
@@ -398,6 +477,22 @@ impl App {
                     && !standing
                 {
                     *minimize = true;
+                }
+                ui.add_space(4.);
+                let horizontal = self.cal.horizontal;
+                if icons::toggle_icon(
+                    ui,
+                    icons::Icon::SplitView,
+                    if horizontal {
+                        "세로 배치로 전환"
+                    } else {
+                        "가로 배치로 전환 · 달력과 메모를 나란히"
+                    },
+                    horizontal,
+                )
+                .clicked()
+                {
+                    self.cal.horizontal = !horizontal;
                 }
                 ui.add_space(4.);
                 let r = icons::toggle_icon(

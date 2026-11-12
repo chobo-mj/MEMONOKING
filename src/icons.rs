@@ -51,6 +51,7 @@ pub enum Icon {
     Bell,
     Restore2,
     Stand,
+    SplitView,
 }
 
 /// An icon-only control with a consistent hit area, keyboard focus and a spoken label.
@@ -421,6 +422,10 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
         Icon::Sidebar => {
             rounded((3.5, 4.5), (20.5, 19.5), 2.5);
             line((9.5, 4.5), (9.5, 19.5));
+        }
+        Icon::SplitView => {
+            rounded((3.5, 4.5), (20.5, 19.5), 2.5);
+            line((14.5, 4.5), (14.5, 19.5));
         }
         Icon::Detach => {
             path(&[(14., 4.), (20., 4.), (20., 10.)]);

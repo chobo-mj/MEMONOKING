@@ -455,6 +455,11 @@ impl App {
         }
     }
     pub fn calendar(&mut self, ui: &mut egui::Ui) {
+        self.calendar_grid(ui);
+        self.calendar_day_detail(ui);
+    }
+    /// The month/week grid with its navigation header and memo bands.
+    pub fn calendar_grid(&mut self, ui: &mut egui::Ui) {
         let today = Local::now().date_naive();
         let (tone, sun, sat, today_mark) = self.calendar_tone(ui);
         ui.horizontal(|ui| {
@@ -652,6 +657,9 @@ impl App {
             }
         }
         self.calendar_bands(ui, all, first, rows, col, height);
+    }
+    /// The selected day's title bar and its list of memos.
+    pub fn calendar_day_detail(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
