@@ -465,17 +465,23 @@ impl App {
             self.arrange = Some(Arrange { layout, fold, area });
             done = true;
         }
-        ui.separator();
-        if ui.button("이 스티커 닫기").clicked() {
-            w.open = false;
-            done = true;
-        }
-        if ui.button("모든 스티커 닫기  Ctrl+Shift+H").clicked() {
-            w.open = false;
-            for other in self.studio.windows.values_mut() {
-                other.open = false;
+        // "닫기" belongs to the sticker's own right-click menu, not to the
+        // "더보기 › 스티커 정렬" submenu: that submenu is specifically about
+        // arranging stickers, and repeating the close actions there just
+        // duplicated what the main context menu already offers.
+        if own {
+            ui.separator();
+            if ui.button("이 스티커 닫기").clicked() {
+                w.open = false;
+                done = true;
             }
-            done = true;
+            if ui.button("모든 스티커 닫기  Ctrl+Shift+H").clicked() {
+                w.open = false;
+                for other in self.studio.windows.values_mut() {
+                    other.open = false;
+                }
+                done = true;
+            }
         }
         done
     }
@@ -2073,5 +2079,43 @@ mod arrangement_tests {
             assert!(w.place.is_some());
         }
         assert!(a.arrange.is_none());
+    }
+    fn menu_has_text(output: &egui::FullOutput, text: &str) -> bool {
+        output
+            .shapes
+            .iter()
+            .any(|shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.job.text == text))
+    }
+    #[test]
+    fn arrange_submenu_omits_the_close_actions_the_context_menu_still_has() {
+        let mut a = App::sample(Local::now().date_naive());
+        let mut w = Window::new(Mode::Editor);
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        // The sticker's own right-click menu (`own = true`) still offers to
+        // close it.
+        let full = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                a.sticker_menu(ui, 0, &mut w, true);
+            });
+        });
+        assert!(menu_has_text(&full, "이 스티커 닫기"));
+        assert!(menu_has_text(&full, "스티커 정렬"));
+        // "더보기 › 스티커 정렬" (`own = false`) is specifically about
+        // arranging stickers; it must not repeat the close actions the
+        // context menu already has.
+        let sub = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                a.sticker_menu(ui, 0, &mut w, false);
+            });
+        });
+        assert!(!menu_has_text(&sub, "이 스티커 닫기"));
+        assert!(!menu_has_text(&sub, "모든 스티커 닫기  Ctrl+Shift+H"));
+        assert!(menu_has_text(&sub, "스티커 정렬"));
+        assert!(menu_has_text(&sub, "화면 오른쪽에 정렬"));
     }
 }
