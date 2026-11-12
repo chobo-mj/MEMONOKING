@@ -139,14 +139,7 @@ impl App {
                 .unwrap()
                 .insert(0, "korean".into());
         }
-        for (name, file, index) in [
-            ("맑은 고딕", "malgun.ttf", 0),
-            ("맑은 고딕 Bold", "malgunbd.ttf", 0),
-            ("굴림", "gulim.ttc", 0),
-            ("돋움", "gulim.ttc", 2),
-            ("바탕", "batang.ttc", 0),
-            ("궁서체", "batang.ttc", 2),
-        ] {
+        for &(name, file, index) in composer::FONTS {
             if let Some(bytes) = font_file(file) {
                 let mut data = egui::FontData::from_static(bytes);
                 data.index = index;

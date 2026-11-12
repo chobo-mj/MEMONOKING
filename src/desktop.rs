@@ -1262,8 +1262,7 @@ impl App {
 fn font_choice(ui: &mut egui::Ui, id: &str, value: &mut String) {
     ui.push_id(id, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for name in ["맑은 고딕", "굴림", "돋움", "바탕", "궁서체", "개구쟁이"]
-            {
+            for name in crate::composer::font_choices() {
                 if crate::ui::pill(ui, value == name, name).clicked() {
                     *value = name.into();
                 }

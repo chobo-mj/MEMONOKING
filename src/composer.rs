@@ -7,6 +7,57 @@ use eframe::egui::{
 };
 use std::{hash::Hash, ops::Range, path::Path};
 
+/// Fonts offered throughout the app (the toolbar's font picker, the
+/// settings page's font pills), each mapped from a file under
+/// `C:/Windows/Fonts` by `main.rs`'s font loader. `index` selects a face
+/// inside a multi-face file (`.ttc`); 0 for an ordinary `.ttf`.
+///
+/// An entry named "<name> Bold" is not a separate choice — the picker
+/// never lists it (see `font_choices`) — it is the face `font_id` looks up
+/// on its own for bold text in that family. Most families here have no
+/// such entry and fall back to the default font's bold face instead,
+/// matching the limitation already accepted for 굴림/돋움/바탕/궁서체.
+pub const FONTS: &[(&str, &str, u32)] = &[
+    ("맑은 고딕", "malgun.ttf", 0),
+    ("맑은 고딕 Bold", "malgunbd.ttf", 0),
+    ("굴림", "gulim.ttc", 0),
+    ("돋움", "gulim.ttc", 2),
+    ("바탕", "batang.ttc", 0),
+    ("궁서체", "batang.ttc", 2),
+    // "개구쟁이" was never an installed font, so selecting it silently
+    // fell back to the default face. 휴먼매직체 is the closest playful
+    // hand-lettered face actually present in C:/Windows/Fonts.
+    ("휴먼매직체", "HMKMMAG.TTF", 0),
+    ("새굴림", "NGULIM.TTF", 0),
+    ("HY중고딕", "H2GTRM.TTF", 0),
+    ("HY견고딕", "H2GTRE.TTF", 0),
+    ("HY신명조", "H2MJSM.TTF", 0),
+    ("HY궁서B", "H2GSRB.TTF", 0),
+    ("HY헤드라인M", "H2HDRM.TTF", 0),
+    ("휴먼둥근헤드라인", "HMKMRHD.TTF", 0),
+    ("휴먼아미체", "HMKMAMI.TTF", 0),
+    ("휴먼편지체", "HMFMPYUN.TTF", 0),
+    ("Noto Sans KR", "NotoSansKR-VF.ttf", 0),
+    ("Calibri", "calibri.ttf", 0),
+    ("Calibri Bold", "calibrib.ttf", 0),
+    ("Georgia", "georgia.ttf", 0),
+    ("Georgia Bold", "georgiab.ttf", 0),
+    ("Consolas", "consola.ttf", 0),
+    ("Consolas Bold", "consolab.ttf", 0),
+    ("Verdana", "verdana.ttf", 0),
+    ("Verdana Bold", "verdanab.ttf", 0),
+    ("Segoe UI", "segoeui.ttf", 0),
+    ("Segoe UI Bold", "segoeuib.ttf", 0),
+];
+/// The names worth showing in a font picker: every `FONTS` entry except
+/// the synthetic "<name> Bold" faces, which are not choices of their own.
+pub fn font_choices() -> impl Iterator<Item = &'static str> {
+    FONTS
+        .iter()
+        .map(|&(name, _, _)| name)
+        .filter(|name| !name.ends_with(" Bold"))
+}
+
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Format {
     pub bold: bool,
@@ -1355,22 +1406,23 @@ fn toolbar(ui: &mut egui::Ui, doc: &mut Document, id: Id, opacity: bool) -> egui
                                     match tool {
                                         Tool::Font => {
                                             ui.strong("글꼴");
-                                            for name in [
-                                                "맑은 고딕",
-                                                "굴림",
-                                                "돋움",
-                                                "바탕",
-                                                "궁서체",
-                                                "개구쟁이",
-                                            ] {
-                                                if ui
-                                                    .selectable_label(doc.font_name == name, name)
-                                                    .clicked()
-                                                {
-                                                    doc.font_name = name.into();
-                                                    ui.memory_mut(|m| m.close_popup());
-                                                }
-                                            }
+                                            egui::ScrollArea::vertical().max_height(220.).show(
+                                                ui,
+                                                |ui| {
+                                                    for name in font_choices() {
+                                                        if ui
+                                                            .selectable_label(
+                                                                doc.font_name == name,
+                                                                name,
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            doc.font_name = name.into();
+                                                            ui.memory_mut(|m| m.close_popup());
+                                                        }
+                                                    }
+                                                },
+                                            );
                                         }
                                         Tool::Size => {
                                             ui.strong("글자 크기");
@@ -2836,6 +2888,30 @@ fn shortcut_substitution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn font_choices_excludes_synthetic_bold_faces_and_the_broken_entry() {
+        let names: Vec<&str> = font_choices().collect();
+        assert!(
+            !names.contains(&"개구쟁이"),
+            "개구쟁이 was never an installed font; it was replaced, not kept"
+        );
+        assert!(names.contains(&"맑은 고딕"));
+        assert!(names.contains(&"휴먼매직체"));
+        assert!(names.contains(&"Noto Sans KR"));
+        assert!(names.contains(&"Calibri"));
+        for name in &names {
+            assert!(
+                !name.ends_with(" Bold"),
+                "{name} is a bold face variant, not its own picker entry"
+            );
+        }
+        // No duplicate display names, and every name appears exactly once
+        // in FONTS (so the picker and the font loader agree on the set).
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len());
+    }
     #[test]
     fn tabs_keep_bodies_and_deleted_tab_content() {
         let mut d = Document::default();
