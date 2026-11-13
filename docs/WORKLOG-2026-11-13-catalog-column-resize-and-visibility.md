@@ -38,3 +38,20 @@
 - 컬럼 순서 변경(드래그로 재배치)은 포함하지 않았다.
 - 컬럼 표시/숨김·너비 설정은 세션 내에서만 유지되며 디스크에 저장되지 않는다(`storage.rs`
   미변경). 영속화가 필요하면 별도로 요청해달라.
+
+## 후속 수정 — "열 표시" 버튼이 안 보이는 문제 (비주얼 검증에서 발견)
+
+실제 PC에서 확인했을 때 너비조정은 되지만 "열 표시" 버튼이 보이지 않는다는 보고를 받았다.
+원인은 조정 가능한 컬럼을 쓰는 표(`catalog_table`)가 두 개의 서로 다른 진입점에서 호출되는데,
+"열 표시" 콤보박스는 그중 `catalog_controls()`(카탈로그 화면의 "전체 메모 보기" 탭)에만 추가했고,
+할일/일정 목록 화면(`views::filters()` → `detail_workspace`/`agenda`)에는 추가하지 않았기 때문이다.
+사용자가 테스트한 "메모 리스트" 화면은 후자였다.
+
+- `catalog_controls()`에서 콤보박스 부분을 `pub(crate) fn column_picker()`로 분리하고,
+  `src/views.rs`의 `filters()`에도 같은 메서드를 호출하도록 추가해 두 화면 모두 "열 표시"가
+  나오게 했다. `ADJUSTABLE_COLUMNS`도 `pub(crate)`로 바꿔 `views.rs`에서 접근 가능하게 했다.
+- 새 테스트 `views::column_picker_tests::filters_offers_the_same_column_picker_as_catalog_controls`
+  — `filters()`를 렌더링해 "열 표시" 텍스트가 실제로 그려지는지 확인(수정 전에는 실패, 수정 후
+  통과함을 직접 되돌려서 확인).
+- `cargo build`/`cargo clippy --all-targets`/`cargo fmt --check`/`cargo test` 모두 통과(기존
+  Windows 폰트 경로 테스트 1건 제외).

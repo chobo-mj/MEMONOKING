@@ -36,6 +36,7 @@ impl App {
             if ui::pill(ui, self.extra.show_done, "완료 메모 보기").clicked() {
                 self.extra.show_done = !self.extra.show_done;
             }
+            self.column_picker(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui::primary(ui, "+ 새 일정").clicked() {
                     self.add_note(Some(match self.page {
@@ -1568,6 +1569,39 @@ mod band_tests {
             }
         );
         assert_eq!(assign_lanes(&segs), vec![0, 1, 1]);
+    }
+}
+#[cfg(test)]
+mod column_picker_tests {
+    use super::*;
+    fn has_text(output: &egui::FullOutput, text: &str) -> bool {
+        output
+            .shapes
+            .iter()
+            .any(|shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.job.text == text))
+    }
+    #[test]
+    fn filters_offers_the_same_column_picker_as_catalog_controls() {
+        // #54 added "열 표시" (column show/hide) to catalog.rs's own
+        // catalog_controls(), but the 할일/일정 list screens reach the same
+        // adjustable-column table through views::filters(), which didn't
+        // call it — the button was simply missing there. Guard that
+        // filters() renders it too.
+        let mut a = App::sample(Local::now().date_naive());
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900., 300.));
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    a.filters(ui);
+                });
+            },
+        );
+        assert!(has_text(&output, "열 표시"));
     }
 }
 #[cfg(test)]

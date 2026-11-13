@@ -81,7 +81,7 @@ const COLUMN_WIDTHS: [f32; 8] = [30., 30., 0., 0., 96., 58., 86., 30.];
 const TABLE_WIDTH: f32 = 560.;
 /// Table indices of the four columns a user can resize or hide, and their
 /// labels in the same order as `Catalog::column_widths`/`column_hidden`.
-const ADJUSTABLE_COLUMNS: [(usize, &str); 4] =
+pub(crate) const ADJUSTABLE_COLUMNS: [(usize, &str); 4] =
     [(1, "완료"), (4, "알람"), (5, "생성일"), (6, "일정")];
 const ADJUSTABLE_MIN_WIDTH: f32 = 24.;
 const ADJUSTABLE_MAX_WIDTH: f32 = 220.;
@@ -423,18 +423,27 @@ impl App {
                     }
                 });
             ui.checkbox(&mut self.catalog.wiki_only, "위키만 보기");
-            egui::ComboBox::from_id_salt("catalog_column_picker")
-                .selected_text("열 표시")
-                .show_ui(ui, |ui| {
-                    for (slot, &(_, label)) in ADJUSTABLE_COLUMNS.iter().enumerate() {
-                        let mut visible = !self.catalog.column_hidden[slot];
-                        if ui.checkbox(&mut visible, label).changed() {
-                            self.catalog.column_hidden[slot] = !visible;
-                        }
-                    }
-                });
+            self.column_picker(ui);
         });
         ui.add_space(8.);
+    }
+
+    /// The "열 표시" column show/hide picker shared by every screen that
+    /// renders the adjustable-column table (`catalog_table`): the catalog's
+    /// own "전체 메모 보기" controls above, and `views::filters` for the
+    /// 할일/일정 list screens that reach the same table via
+    /// `detail_workspace`.
+    pub(crate) fn column_picker(&mut self, ui: &mut egui::Ui) {
+        egui::ComboBox::from_id_salt("catalog_column_picker")
+            .selected_text("열 표시")
+            .show_ui(ui, |ui| {
+                for (slot, &(_, label)) in ADJUSTABLE_COLUMNS.iter().enumerate() {
+                    let mut visible = !self.catalog.column_hidden[slot];
+                    if ui.checkbox(&mut visible, label).changed() {
+                        self.catalog.column_hidden[slot] = !visible;
+                    }
+                }
+            });
     }
 
     fn catalog_find_bar(&mut self, ui: &mut egui::Ui, ids: &[usize]) {
