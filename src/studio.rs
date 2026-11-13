@@ -410,7 +410,14 @@ impl App {
             self.desktop.monitor_pick = false;
         }
     }
-    fn sticker_menu(&mut self, ui: &mut egui::Ui, i: usize, w: &mut Window, own: bool) -> bool {
+    fn sticker_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        w: &mut Window,
+        own: bool,
+        sub2: &mut Option<(Layout, f32)>,
+    ) -> bool {
         let ctx = ui.ctx().clone();
         let area = self.arrange_area(&ctx);
         let locked = self.data.notes[i].locked;
@@ -429,40 +436,29 @@ impl App {
             ui.separator();
         }
         crate::ui::caption(ui, "스티커 정렬");
-        let mut pick = None;
-        for (label, layout, fold) in [
-            ("화면 오른쪽에 정렬", Layout::Right, None),
-            ("화면 왼쪽에 정렬", Layout::Left, None),
-            ("계단식으로 정렬", Layout::Cascade, None),
+        // "화면 오른쪽/왼쪽에 정렬" each open their own popup (모두 제목만
+        // 보이게 / 모두 상자로 접기 / 모두펼치기, specific to that side)
+        // instead of arranging immediately, mirroring how "스티커 정렬"
+        // itself opens beside the 더보기 메뉴.
+        let origin = ctx
+            .input(|v| v.viewport().inner_rect.map(|r| r.min))
+            .unwrap_or_default();
+        for (label, layout) in [
+            ("화면 오른쪽에 정렬", Layout::Right),
+            ("화면 왼쪽에 정렬", Layout::Left),
         ] {
-            if ui.button(label).clicked() {
-                pick = Some((layout, fold));
+            let open = sub2.is_some_and(|(l, _)| l == layout);
+            let r = submenu_row(ui, label, open);
+            if r.hovered() || r.clicked() {
+                *sub2 = Some((layout, origin.y + r.rect.top() - 6.));
             }
         }
-        ui.separator();
-        for (label, layout, fold) in [
-            (
-                "모두 제목만 보이게 · 오른쪽 정렬",
-                Layout::Right,
-                Some(Mode::Title),
-            ),
-            (
-                "모두 상자로 접기 · 오른쪽 정렬",
-                Layout::Right,
-                Some(Mode::Swatch),
-            ),
-            (
-                "모두 펼치기 · 계단식 정렬",
-                Layout::Cascade,
-                Some(Mode::Sticker),
-            ),
-        ] {
-            if ui.button(label).clicked() {
-                pick = Some((layout, fold));
-            }
-        }
-        if let Some((layout, fold)) = pick {
-            self.arrange = Some(Arrange { layout, fold, area });
+        if ui.button("계단식으로 정렬").clicked() {
+            self.arrange = Some(Arrange {
+                layout: Layout::Cascade,
+                fold: None,
+                area,
+            });
             done = true;
         }
         // "닫기" belongs to the sticker's own right-click menu, not to the
@@ -485,6 +481,28 @@ impl App {
         }
         done
     }
+    /// The popup beside "화면 오른쪽/왼쪽에 정렬": fold-mode options specific
+    /// to that arrangement side.
+    fn arrange_side_menu(&mut self, ui: &mut egui::Ui, layout: Layout) -> bool {
+        let ctx = ui.ctx().clone();
+        let area = self.arrange_area(&ctx);
+        let mut done = false;
+        for (label, fold) in [
+            ("모두 제목만 보이게", Mode::Title),
+            ("모두 상자로 접기", Mode::Swatch),
+            ("모두펼치기", Mode::Sticker),
+        ] {
+            if ui.button(label).clicked() {
+                self.arrange = Some(Arrange {
+                    layout,
+                    fold: Some(fold),
+                    area,
+                });
+                done = true;
+            }
+        }
+        done
+    }
     /// Shows the sticker menu as its own small window at the pointer, so it
     /// is never clipped by a title bar or a tiny color box.
     fn sticker_menu_window(&mut self, ctx: &egui::Context, i: usize, w: &mut Window) {
@@ -498,6 +516,7 @@ impl App {
         let area = crate::native_window::work_area(ctx).unwrap_or_else(|| ctx.screen_rect());
         let pos = fit_in(m.at, m.size, area);
         let mut sub = m.sub;
+        let mut sub2 = m.sub2;
         let mut done = false;
         let paper = (m.kind == MenuKind::Linked).then_some(self.data.notes[i].color);
         let shown = menu_window(
@@ -507,7 +526,7 @@ impl App {
             m.size,
             paper,
             |ui| match m.kind {
-                MenuKind::Context => self.sticker_menu(ui, i, w, true),
+                MenuKind::Context => self.sticker_menu(ui, i, w, true, &mut sub2),
                 MenuKind::More => self.more_items(ui, i, w, pos, &mut sub),
                 MenuKind::Project => self.project_items(ui, i),
                 MenuKind::Linked => self.linked_items(ui, i),
@@ -517,6 +536,11 @@ impl App {
         done |= shown.result == Some(true);
         let mut focused = shown.focused;
         let mut escape = shown.escape;
+        // Rect of whichever window's "스티커 정렬" section is active, so the
+        // level-3 arrange-side popup below can anchor beside the right one:
+        // the Context menu's own window, or the 더보기 › 스티커 정렬 submenu.
+        let mut arrange_host =
+            (m.kind == MenuKind::Context).then(|| Rect::from_min_size(pos, m.size));
         if let Some((kind, top)) = sub {
             let parent = Rect::from_min_size(pos, m.size);
             let spos = submenu_pos(parent, m.sub_size, top, area);
@@ -528,15 +552,38 @@ impl App {
                 None,
                 |ui| match kind {
                     SubMenu::Project => self.project_items(ui, i),
-                    SubMenu::Arrange => self.sticker_menu(ui, i, w, false),
+                    SubMenu::Arrange => self.sticker_menu(ui, i, w, false, &mut sub2),
                 },
             );
             m.sub_size = shown.size;
             done |= shown.result == Some(true);
             focused |= shown.focused;
             escape |= shown.escape;
+            if kind == SubMenu::Arrange {
+                arrange_host = Some(Rect::from_min_size(spos, m.sub_size));
+            }
         }
         m.sub = sub;
+        if let Some((layout, top)) = sub2 {
+            if let Some(parent) = arrange_host {
+                let spos = submenu_pos(parent, m.sub2_size, top, area);
+                let shown = menu_window(
+                    ctx,
+                    egui::ViewportId::from_hash_of(("sticker_arrange_side", i)),
+                    spos,
+                    m.sub2_size,
+                    None,
+                    |ui| self.arrange_side_menu(ui, layout),
+                );
+                m.sub2_size = shown.size;
+                done |= shown.result == Some(true);
+                focused |= shown.focused;
+                escape |= shown.escape;
+            } else {
+                sub2 = None;
+            }
+        }
+        m.sub2 = sub2;
         // Focus moves between the menu and its submenu window; only close when
         // neither has had it for a moment.
         let now = ctx.input(|v| v.time);
@@ -786,6 +833,11 @@ pub struct Menu {
     size: Vec2,
     sub: Option<(SubMenu, f32)>,
     sub_size: Vec2,
+    /// "화면 오른쪽/왼쪽에 정렬" popup, a third window beside whichever
+    /// window's "스티커 정렬" section opened it (the Context menu itself, or
+    /// the 더보기 › 스티커 정렬 submenu).
+    sub2: Option<(Layout, f32)>,
+    sub2_size: Vec2,
     seen_focus: bool,
     away_since: Option<f64>,
     /// Opened this frame: the click that opened it may still read as a press.
@@ -799,6 +851,8 @@ impl Menu {
             size: Vec2::new(228., 120.),
             sub: None,
             sub_size: Vec2::new(228., 120.),
+            sub2: None,
+            sub2_size: Vec2::new(200., 110.),
             seen_focus: false,
             away_since: None,
             fresh: true,
@@ -2098,9 +2152,10 @@ mod arrangement_tests {
         };
         // The sticker's own right-click menu (`own = true`) still offers to
         // close it.
+        let mut sub2 = None;
         let full = ctx.run(input(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                a.sticker_menu(ui, 0, &mut w, true);
+                a.sticker_menu(ui, 0, &mut w, true, &mut sub2);
             });
         });
         assert!(menu_has_text(&full, "이 스티커 닫기"));
@@ -2108,14 +2163,157 @@ mod arrangement_tests {
         // "더보기 › 스티커 정렬" (`own = false`) is specifically about
         // arranging stickers; it must not repeat the close actions the
         // context menu already has.
+        let mut sub2 = None;
         let sub = ctx.run(input(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                a.sticker_menu(ui, 0, &mut w, false);
+                a.sticker_menu(ui, 0, &mut w, false, &mut sub2);
             });
         });
         assert!(!menu_has_text(&sub, "이 스티커 닫기"));
         assert!(!menu_has_text(&sub, "모든 스티커 닫기  Ctrl+Shift+H"));
         assert!(menu_has_text(&sub, "스티커 정렬"));
         assert!(menu_has_text(&sub, "화면 오른쪽에 정렬"));
+    }
+    #[test]
+    fn arrange_menu_no_longer_offers_the_old_combined_position_and_mode_items() {
+        // #58 follow-up: "화면 오른쪽/왼쪽에 정렬" now each open their own
+        // side-specific popup instead of a flat list that mixed position and
+        // fold-mode into one label; those old combined items must be gone
+        // from both the context menu and the 더보기 › 스티커 정렬 submenu.
+        let mut a = App::sample(Local::now().date_naive());
+        let mut w = Window::new(Mode::Editor);
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        for own in [true, false] {
+            let mut sub2 = None;
+            let out = ctx.run(input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    a.sticker_menu(ui, 0, &mut w, own, &mut sub2);
+                });
+            });
+            for gone in [
+                "모두 제목만 보이게 · 오른쪽 정렬",
+                "모두 상자로 접기 · 오른쪽 정렬",
+                "모두 펼치기 · 계단식 정렬",
+            ] {
+                assert!(!menu_has_text(&out, gone), "own={own}: still has {gone}");
+            }
+            // The plain cascade action stays, unchanged.
+            assert!(menu_has_text(&out, "계단식으로 정렬"));
+            assert!(menu_has_text(&out, "화면 왼쪽에 정렬"));
+        }
+    }
+    #[test]
+    fn clicking_the_right_side_row_opens_its_popup_instead_of_arranging_immediately() {
+        let mut a = App::sample(Local::now().date_naive());
+        let mut w = Window::new(Mode::Editor);
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.));
+        let full = Rect::from_min_size(Pos2::ZERO, Vec2::new(300., 300.));
+        // First frame: find the "화면 오른쪽에 정렬" row's position.
+        let mut sub2 = None;
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    a.sticker_menu(ui, 0, &mut w, true, &mut sub2);
+                });
+            },
+        );
+        let rect = out
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(t) = &shape.shape {
+                    if t.galley.job.text == "화면 오른쪽에 정렬" {
+                        return Some(t.galley.rect.translate(t.pos.to_vec2()));
+                    }
+                }
+                None
+            })
+            .expect("화면 오른쪽에 정렬 row should be drawn");
+        // Second frame: hover that row (the same hover-opens-submenu
+        // interaction already used for the top-level "스티커 정렬" row).
+        let _ = full;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::PointerMoved(rect.center())],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    a.sticker_menu(ui, 0, &mut w, true, &mut sub2);
+                });
+            },
+        );
+        assert_eq!(sub2.map(|(l, _)| l), Some(Layout::Right));
+        assert!(a.arrange.is_none(), "hovering must not arrange immediately");
+    }
+    #[test]
+    fn arrange_side_menu_arranges_with_the_clicked_fold_mode() {
+        let mut a = App::sample(Local::now().date_naive());
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(300., 200.));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        // First frame: locate the "모두 상자로 접기" button.
+        let out = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                a.arrange_side_menu(ui, Layout::Left);
+            });
+        });
+        let rect = out
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Text(t) = &shape.shape {
+                    if t.galley.job.text == "모두 상자로 접기" {
+                        return Some(t.galley.rect.translate(t.pos.to_vec2()));
+                    }
+                }
+                None
+            })
+            .expect("모두 상자로 접기 button should be drawn");
+        // Second frame: click it.
+        let pos = rect.center();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    a.arrange_side_menu(ui, Layout::Left);
+                });
+            },
+        );
+        let arrange = a.arrange.expect("should have arranged");
+        assert_eq!(arrange.layout, Layout::Left);
+        assert_eq!(arrange.fold, Some(Mode::Swatch));
     }
 }
