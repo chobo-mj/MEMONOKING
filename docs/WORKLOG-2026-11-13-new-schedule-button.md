@@ -33,3 +33,18 @@
 - Linux: `cargo test` (views 모듈 전체 통과), `cargo clippy --all-targets` 경고 없음,
   `cargo fmt --check` 통과.
 - Windows 실기 UI 확인은 이번 라운드 작업을 모두 마친 뒤 한 번에 요청할 예정.
+
+## 후속 수정 — 기본 제목/본문 텍스트 제거 (비주얼 검증에서 발견)
+
+위에서 "바꾸지 않겠다"고 명시했던 기본 제목("새 할 일")·기본 본문
+("아이디어와 준비할 내용을 여기에 정리하세요.")이 실제로는 매번 지우고 시작해야 해서 불편하다는
+피드백을 받았다. `src/main.rs`의 `add_note()`를 수정해 제목은 빈 문자열로, 본문도 비워서 시작하도록
+바꿨다 — 제목/본문 입력창 자체의 안내문(hint text: "제목", 본문 placeholder)이 이미 있어 빈 상태로도
+무엇을 입력해야 하는지 알 수 있다. `add_note`는 "+ 새 일정" 버튼과 캘린더의 날짜 클릭-추가 등 다른
+진입점에서도 공유되므로, 이 변경은 새 메모를 만드는 모든 경로에 일괄 적용된다. `model.rs`의
+`Note::new()` 자체(기본 생성자)는 바꾸지 않았다 — 샘플/데모 데이터, 다른 기존 호출부(스티커 빈 메모
+등)에 영향이 번지는 것을 피하기 위해 `add_note` 쪽에서만 제목/본문을 비웠다.
+
+- `src/views.rs`의 `new_schedule_button_creates_a_dated_note_and_opens_its_editor` 테스트에
+  제목/본문이 빈 문자열인지 확인하는 단언을 추가했다.
+- `cargo build`/`cargo clippy --all-targets`/`cargo fmt --check`/`cargo test` 모두 통과.

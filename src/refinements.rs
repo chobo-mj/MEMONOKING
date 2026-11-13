@@ -487,6 +487,57 @@ impl App {
             self.in_rect(ui, pane, ("wiki_pane", k), |a, ui| a.wiki_pane(ui, k));
         }
         ui.allocate_rect(rect, egui::Sense::hover());
+        self.wiki_tab_delete_dialog(ui.ctx());
+    }
+    /// Confirms before a wiki tab is actually soft-deleted (added to
+    /// `deleted_wiki_tabs`), mirroring `delete_project`'s confirmation
+    /// dialog so an accidental click on "삭제" in the tab's context menu
+    /// doesn't lose the tab outright.
+    fn wiki_tab_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(t) = self.extra.delete_wiki_tab else {
+            return;
+        };
+        let Some(name) = self.extra.wiki_tabs.get(t).cloned() else {
+            self.extra.delete_wiki_tab = None;
+            return;
+        };
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancel = false;
+        ui::dialog(
+            ctx,
+            "delete_wiki_tab",
+            "위키 탭 삭제",
+            [380., 200.],
+            true,
+            &mut open,
+            |ui| {
+                ui.label(
+                    RichText::new(format!("‘{name}’ 탭을 정말 삭제하시겠습니까?"))
+                        .strong()
+                        .size(15.),
+                );
+                ui.add_space(4.);
+                ui::hint(
+                    ui,
+                    "탭 안의 폴더와 메모 분류는 그대로 남지만, 탭 자체는 목록에서 사라집니다.",
+                );
+                (confirmed, cancel) = ui::dialog_buttons(ui, "삭제", "취소");
+            },
+        );
+        if confirmed {
+            self.confirm_wiki_tab_delete(t);
+        } else if cancel || !open {
+            self.extra.delete_wiki_tab = None;
+        }
+    }
+    fn confirm_wiki_tab_delete(&mut self, t: usize) {
+        self.extra.deleted_wiki_tabs.insert(t);
+        if self.extra.wiki_tab == t {
+            self.extra.wiki_tab =
+                next_wiki_tab(self.extra.wiki_tabs.len(), &self.extra.deleted_wiki_tabs);
+        }
+        self.extra.delete_wiki_tab = None;
     }
     /// Run `add` in a child ui confined to `rect`.
     fn in_rect(
@@ -590,13 +641,7 @@ impl App {
                             .on_disabled_hover_text("마지막 위키 탭은 삭제할 수 없습니다")
                             .clicked()
                         {
-                            self.extra.deleted_wiki_tabs.insert(t);
-                            if self.extra.wiki_tab == t {
-                                self.extra.wiki_tab = next_wiki_tab(
-                                    self.extra.wiki_tabs.len(),
-                                    &self.extra.deleted_wiki_tabs,
-                                );
-                            }
+                            self.extra.delete_wiki_tab = Some(t);
                             ui.close_menu();
                         }
                     });
@@ -1264,6 +1309,22 @@ mod tests {
         // rather than discarding it outright.
         assert_eq!(a.extra.wiki_tab_colors.get(&0), Some(&egui::Color32::RED));
         assert_eq!(a.extra.wiki_tabs.len(), 2);
+    }
+    #[test]
+    fn wiki_tab_delete_asks_for_confirmation_before_it_takes_effect() {
+        // The tab bar's "삭제" button only arms a pending confirmation; the
+        // tab must stay fully intact until the dialog is confirmed, and a
+        // cancel must leave it untouched.
+        let mut a = app();
+        a.extra.wiki_tabs.push("위키 2".into());
+        a.extra.delete_wiki_tab = Some(0);
+        assert!(!a.extra.deleted_wiki_tabs.contains(&0));
+        a.extra.delete_wiki_tab = None; // cancel: nothing was deleted
+        assert!(!a.extra.deleted_wiki_tabs.contains(&0));
+        assert_eq!(a.extra.wiki_tabs.len(), 2);
+        a.confirm_wiki_tab_delete(0);
+        assert!(a.extra.deleted_wiki_tabs.contains(&0));
+        assert_eq!(a.extra.delete_wiki_tab, None);
     }
     #[test]
     fn no_project_filter_is_distinct_from_all() {

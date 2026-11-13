@@ -42,3 +42,30 @@
 ## 시험
 - Linux: `cargo test` 132개 중 131 통과(윈도우 전용 글꼴 경로 테스트 1개는 기존 실패, 회귀 아님),
   `cargo clippy --all-targets` 경고 없음, `cargo fmt --check` 통과.
+
+## 후속 수정 — 삭제 확인 경고창 추가 (비주얼 검증에서 요청)
+
+"삭제" 버튼을 누르면 확인 없이 바로 소프트 삭제되던 것을, `delete_project`와 동일한 패턴(대기 상태
++ 확인 다이얼로그)으로 바꿨다.
+
+- `src/extras.rs`: `Extra`에 `delete_wiki_tab: Option<usize>`(영속화되지 않는 일시 상태, 기존
+  `wiki_rename`과 같은 위치) 추가.
+- `src/refinements.rs`: 탭 컨텍스트 메뉴의 "삭제" 클릭은 이제 바로 지우지 않고
+  `self.extra.delete_wiki_tab = Some(t)`만 설정한다. `wiki()` 끝에서 호출하는 새
+  `wiki_tab_delete_dialog()`가 "‘{이름}’ 탭을 정말 삭제하시겠습니까?" 문구와 삭제/취소 버튼을
+  보여주고, 확인을 누른 경우에만 실제 삭제 로직(`confirm_wiki_tab_delete`, 기존
+  `deleted_wiki_tabs` 소프트 삭제 + 선택 이동)을 수행한다. 취소하거나 다이얼로그를 닫으면 아무
+  변화 없이 대기 상태만 비운다.
+- 새 테스트 `wiki_tab_delete_asks_for_confirmation_before_it_takes_effect` — 대기 상태로 설정한
+  것만으로는 삭제되지 않고, 취소해도 그대로 남아 있으며, `confirm_wiki_tab_delete`를 호출해야만
+  실제로 삭제되는지 확인.
+
+### 삭제된 탭 복원(휴지통) — 아직 미해결
+사용자가 삭제한 위키 탭이 메모 휴지통(`trash_ui`)에 보이지 않는다고 확인했다. 현재 "삭제"는
+`deleted_wiki_tabs`에 숨기는 소프트 삭제라 데이터 자체(이름/색/그 안의 폴더·메모 분류)는 남아
+있지만, 이를 되돌리는 UI가 전혀 없다(이는 애초에 #60 작업 당시 작업 범위 밖으로 명시했던 부분).
+위키 탭은 `Note`가 아니라서 기존 `휴지통` 화면이 쓰는 표(`catalog_table`/`TableRow`) 구조에 바로
+끼워 넣기 어렵다 — 어떤 방식으로 복원 기능을 원하시는지(휴지통 화면에 통합할지, 위키 화면 자체에
+작은 "삭제된 탭 복원" 목록을 둘지) 확인 후 별도로 진행하기로 함.
+
+- `cargo build`/`cargo clippy --all-targets`/`cargo fmt --check`/`cargo test` 모두 통과.

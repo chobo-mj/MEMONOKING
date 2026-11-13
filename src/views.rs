@@ -1620,5 +1620,9 @@ mod schedule_button_tests {
         assert!(a.editor);
         assert_eq!(a.active, i);
         assert!(a.studio.windows.contains_key(&i));
+        // Starts blank (no "새 할 일" title or placeholder body text to
+        // delete by hand) - the title/body fields' own hint text is enough.
+        assert_eq!(a.data.notes[i].title, "");
+        assert_eq!(a.data.notes[i].body, "");
     }
 }

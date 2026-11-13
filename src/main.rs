@@ -355,7 +355,13 @@ impl App {
     }
     fn add_note(&mut self, date: Option<NaiveDate>) {
         let i = self.data.notes.len();
-        self.data.notes.push(Note::new("새 할 일", date, i));
+        // Start blank: the title field's own hint text ("제목") and the
+        // body's hint text already tell the user what goes there, so no
+        // placeholder title/body text is needed (and had to be deleted by
+        // hand every time before this fix).
+        let mut n = Note::new("", date, i);
+        n.body.clear();
+        self.data.notes.push(n);
         self.open_note(i);
     }
     fn done(&mut self, i: usize, value: bool) {
